@@ -1,6 +1,6 @@
 # Security model
 
-Status: proposed for v1
+Status: implemented for v1
 
 `schlaflos` changes global macOS power settings from a root LaunchDaemon. Its
 security model assumes that unprivileged users and self-hosted CI workloads may be
@@ -117,7 +117,7 @@ directory.
 ## Concurrency
 
 Manual and scheduled reconciliation can overlap. A root-owned lock under
-`/var/run/schlaflos` permits only one mutation sequence at a time. Failure to
+`/var/db/schlaflos` permits only one mutation sequence at a time. Failure to
 acquire the lock never falls back to an unlocked mutation.
 
 Configuration and binary upgrades use same-directory temporary files, explicit

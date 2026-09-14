@@ -1,6 +1,7 @@
 # schlaflos architecture
 
-Status: proposed for v1
+Status: implemented for v1 (delivery plan steps 1-5); privileged integration testing
+and signed releases are still pending
 
 ## 1. Purpose
 
@@ -118,9 +119,18 @@ request immediately; the effective setting then returns to the recorded baseline
 - Unknown fields, malformed days, zero-length windows, and invalid durations are
   configuration errors.
 
-Policy evaluation returns a stable reason code in addition to the desired state,
-for example `scheduled_window`, `active_process_guard`, `battery_power`, or
-`outside_window`.
+Policy evaluation returns a stable reason code in addition to the desired state:
+
+| Reason | Meaning |
+| --- | --- |
+| `scheduled_window` | inside a configured window; inhibition requested |
+| `active_process_guard` | outside every window, but a guard matches; inhibition requested |
+| `battery_power` | a window or guard applies, but the Mac is on battery and `require_ac` is set |
+| `outside_window` | no window and no guard applies |
+
+The reconciler adds two codes of its own outside the policy function:
+`invalid_configuration` when the installed configuration fails validation and
+`power_source_unknown` when the power source cannot be read.
 
 ## 5. Wake scheduling
 
@@ -209,9 +219,18 @@ documented in [`security.md`](security.md).
 /var/db/schlaflos/status.json
     Redacted status projection readable by unprivileged users.
 
-/var/run/schlaflos/reconcile.lock
+/var/db/schlaflos/reconcile.lock
     Root-owned lock preventing concurrent manual and launchd reconciliation.
+
+/var/log/schlaflos.log
+    launchd standard output and error of the reconciler.
 ```
+
+On macOS `/var` is a symbolic link to `/private/var`. Because symbolic links are
+rejected anywhere in a privileged path chain, the implementation addresses every
+path under `/var` through its canonical `/private/var` form. The lock lives next
+to the ledger rather than under `/var/run` because `/private/var/run` is
+`root:daemon 0775`, which violates the group-writable rule, and is emptied at boot.
 
 The installation directory and every privileged ancestor must be root-owned and
 must not be group-writable or world-writable. The installer fails rather than
@@ -236,7 +255,7 @@ root-owned binary under `/Library/Application Support`.
 Proposed public commands:
 
 ```text
-schlaflos init
+schlaflos init [PATH]
 schlaflos config check PATH
 schlaflos status [--json]
 schlaflos doctor
@@ -251,6 +270,10 @@ Internal/service command:
 ```text
 schlaflos reconcile [--dry-run]
 ```
+
+`schlaflos version` prints the build version. `reconcile --dry-run` evaluates
+and prints the decision without acquiring ownership of anything; it still needs
+root because the installed configuration and ledger are `0600`.
 
 `emergency-off` explicitly forces `disablesleep = 0`, removes the wake schedule
 only when it is still owned by `schlaflos`, and unloads the LaunchDaemon without
@@ -284,7 +307,9 @@ material, runner credentials, and arbitrary environment variables are outside th
 schema and must never be copied into the installed configuration.
 
 Process guards match a canonical executable path, not a substring of a shell
-command line. This reduces false positives and avoids exposing full arguments in
+command line. The snapshot comes from `/bin/ps -axo pid=,comm=`, whose `comm`
+column on macOS is the executable path passed to `execve`; the configured path
+must therefore be the absolute path the workload is actually launched with. This reduces false positives and avoids exposing full arguments in
 status output. More guard kinds may be added later, but v1 does not expose a plugin
 or arbitrary-script interface.
 
@@ -295,12 +320,17 @@ cmd/schlaflos/                 CLI entry point
 internal/config/               TOML schema, decoding, validation
 internal/policy/               pure desired-state calculation and reason codes
 internal/reconcile/            orchestration and transition logic
+internal/install/              install, config apply, uninstall, emergency-off
+internal/doctor/               read-only installation checks
 internal/processguard/         process snapshot and executable matching
 internal/state/                private ledger, redacted status, atomic persistence
+internal/layout/               privileged paths, label, and mode table
+internal/safefs/               path-chain verification, atomic writes, lock
+internal/platform/macos/cmdrun/ fixed-path subprocess execution and test fake
 internal/platform/macos/power/ AC state and sleep-inhibition adapter
 internal/platform/macos/wake/  pmset schedule inspection and mutation
 internal/platform/macos/launchd/ plist rendering and service management
-packaging/launchd/             plist template or embedded source
+packaging/launchd/             embedded LaunchDaemon plist template
 examples/                      example configuration
 docs/                          architecture and operational documentation
 ```
@@ -337,6 +367,12 @@ Failure behavior:
 - Concurrent invocation: leave mutation to the lock holder and exit without
   changing state.
 
+Before every mutation the reconciler persists the intended value as a pending
+write; after the mutation is verified it becomes the last written value. On the
+next run a pending write whose value is observed is adopted as owned, and one
+whose value is not observed is discarded. This is how an interrupted process is
+distinguished from an external change.
+
 `launchd` retries at the next interval. Reconciliation must be idempotent so that
 retries are harmless.
 
@@ -363,11 +399,11 @@ power settings modified by the test suite.
 
 ## 13. Delivery plan
 
-1. Define the versioned configuration model and pure policy package.
-2. Add read-only macOS adapters plus `config check`, `status`, and `doctor`.
-3. Implement `reconcile --dry-run` and durable state snapshots.
-4. Add sleep-state mutation and `emergency-off`.
-5. Add installation, LaunchDaemon management, and guarded wake scheduling.
+1. Define the versioned configuration model and pure policy package. (done)
+2. Add read-only macOS adapters plus `config check`, `status`, and `doctor`. (done)
+3. Implement `reconcile --dry-run` and durable state snapshots. (done)
+4. Add sleep-state mutation and `emergency-off`. (done)
+5. Add installation, LaunchDaemon management, and guarded wake scheduling. (done)
 6. Exercise privileged integration tests on a dedicated Mac.
 7. Publish signed `darwin/arm64` and `darwin/amd64` binaries with checksums.
 

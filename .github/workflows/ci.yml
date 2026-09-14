@@ -1,0 +1,24 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # The suite uses fakes for pmset and launchctl; it never changes the
+    # runner's power settings. macOS is required for the darwin-only syscalls.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: extractions/setup-just@v2
+      - run: just check
+      - run: just build
+      - run: ./bin/schlaflos config check examples/schlaflos.toml

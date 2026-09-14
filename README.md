@@ -71,8 +71,8 @@ uses fakes for `pmset` and `launchctl` and never changes power settings.
 
 ## Status
 
-The v1 implementation is complete for the documented command set. Privileged
-integration testing on a dedicated Mac and signed releases are still pending, so
+The v1 implementation is complete for the documented command set and has passed
+the privileged integration test on a real Mac. Signed releases are still pending, so
 verify the behavior on a machine you control before relying on it.
 
 ## Security

@@ -1,7 +1,6 @@
 # schlaflos architecture
 
-Status: implemented for v1 (delivery plan steps 1-5); privileged integration testing
-and signed releases are still pending
+Status: implemented for v1 (delivery plan steps 1-6); signed releases are still pending
 
 ## 1. Purpose
 
@@ -427,7 +426,7 @@ by the test suite.
 3. Implement `reconcile --dry-run` and durable state snapshots. (done)
 4. Add sleep-state mutation and `emergency-off`. (done)
 5. Add installation, LaunchDaemon management, and guarded wake scheduling. (done)
-6. Exercise privileged integration tests on a dedicated Mac.
+6. Exercise privileged integration tests on a dedicated Mac. (done on the maintainer's Mac, 2026-09-14, 48/48 with `scripts/integration-privileged.sh`)
 7. Publish signed `darwin/arm64` and `darwin/amd64` binaries with checksums.
 
 ## 14. Deliberate non-goals for v1

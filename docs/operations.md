@@ -137,3 +137,27 @@ removes only the artifacts it installed.
   recovers the exact days from the powerd preference file when it can; if it
   cannot, uninstall cancels such a pre-install schedule instead of restoring it
   and says so during installation.
+
+## Integration testing
+
+The unit tests never touch the machine. The privileged lifecycle is exercised
+by `scripts/integration-privileged.sh`, which installs, reconciles, applies a
+new configuration, provokes drift, runs `emergency-off`, upgrades, and
+uninstalls, asserting the `pmset` and `launchctl` state at each step and that
+the pre-test values are restored at the end.
+
+Run it only on a throwaway system. Two entry points exist:
+
+```sh
+just integration-vm           # inside a Tart macOS VM; the host is untouched
+just integration-privileged   # on this Mac; only for a dedicated machine
+```
+
+`integration-vm` needs Apple silicon, [Tart](https://tart.run), and roughly
+25 GB of free disk for the base image on the first run. The VM is deleted
+afterwards unless `KEEP_VM=1` is set. Docker and Apple Container cannot host
+this test: both run Linux guests, and the test needs macOS `powerd` and
+`launchd`.
+
+A VM always reports AC power, so battery behavior is covered by the policy
+unit tests only.

@@ -392,10 +392,12 @@ Additional tests cover atomic state writes, symlink rejection, plist rendering,
 ownership and mode validation for complete path chains, concurrent invocation,
 corrupt-state recovery, drift detection, and redaction of public status.
 
-Privileged integration tests should run only on a dedicated Mac. They should verify
-install, repeated reconciliation, wake-schedule conflict handling,
-`emergency-off`, upgrade, and uninstall. A shared CI runner must not have its global
-power settings modified by the test suite.
+Privileged integration tests run only on a dedicated Mac or a throwaway macOS
+VM (`scripts/integration-privileged.sh`, wrapped for Tart by
+`scripts/integration-vm.sh`). They verify install, repeated reconciliation,
+wake-schedule handling, drift convergence, `emergency-off`, upgrade, and
+uninstall. A shared CI runner must not have its global power settings modified
+by the test suite.
 
 ## 13. Delivery plan
 

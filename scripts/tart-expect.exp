@@ -1,0 +1,14 @@
+#!/usr/bin/expect -f
+# Runs a command (ssh/scp) and answers password and host-key prompts.
+# usage: tart-expect.exp PASSWORD command args...
+set timeout -1
+set password [lindex $argv 0]
+set cmd [lrange $argv 1 end]
+spawn {*}$cmd
+expect {
+    -re {[Pp]assword:} { send "$password\r"; exp_continue }
+    -re {\(yes/no(/\[fingerprint\])?\)\?} { send "yes\r"; exp_continue }
+    eof
+}
+catch wait result
+exit [lindex $result 3]

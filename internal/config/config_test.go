@@ -104,6 +104,10 @@ func TestRejections(t *testing.T) {
 		{"guard unclean", "version = 1\n[[guards.process]]\nname = \"a\"\nexecutable = \"/opt/../bin/ls\"\n", "clean path"},
 		{"guard unknown key", "version = 1\n[[guards.process]]\nname = \"a\"\nexecutable = \"/bin/ls\"\ncommand = \"rm -rf /\"\n", "unknown configuration keys: guards.process.command"},
 		{"not toml", "version = [\n", "invalid TOML"},
+		{"wake interval invalid", "version = 1\n[[windows]]\ndays = [\"mon\"]\nstart = \"08:00\"\nend = \"09:00\"\n[wake]\nenabled = true\ndays = [\"mon\"]\ntime = \"08:00\"\ninterval = \"hourly\"\n", "not a valid duration"},
+		{"wake interval too short", "version = 1\n[[windows]]\ndays = [\"mon\"]\nstart = \"08:00\"\nend = \"09:00\"\n[wake]\nenabled = true\ndays = [\"mon\"]\ntime = \"08:00\"\ninterval = \"1m\"\n", "between 5m0s and 12h0m0s"},
+		{"wake interval fractional", "version = 1\n[[windows]]\ndays = [\"mon\"]\nstart = \"08:00\"\nend = \"09:00\"\n[wake]\nenabled = true\ndays = [\"mon\"]\ntime = \"08:00\"\ninterval = \"5m30s\"\n", "whole number of minutes"},
+		{"wake interval without windows", "version = 1\n[wake]\nenabled = true\ndays = [\"mon\"]\ntime = \"08:00\"\ninterval = \"1h\"\n", "requires at least one window"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -131,5 +135,19 @@ func TestCrossesMidnight(t *testing.T) {
 	}
 	if (Window{Start: Clock{8, 0}, End: Clock{20, 0}}).CrossesMidnight() {
 		t.Fatal("08:00-20:00 should not cross midnight")
+	}
+}
+
+func TestWakeInterval(t *testing.T) {
+	cfg, err := Parse([]byte("version = 1\n[[windows]]\ndays = [\"mon\"]\nstart = \"08:00\"\nend = \"20:00\"\n[wake]\nenabled = true\ndays = [\"mon\"]\ntime = \"08:00\"\ninterval = \"1h\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Wake.Interval != time.Hour {
+		t.Fatalf("interval = %s", cfg.Wake.Interval)
+	}
+	cfg, _ = Parse([]byte(Example))
+	if cfg.Wake.Interval != 0 {
+		t.Fatal("example must not enable interval wakes by default")
 	}
 }

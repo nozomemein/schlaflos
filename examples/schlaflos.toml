@@ -20,6 +20,11 @@ enabled = true
 days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 time = "08:00"
 action = "wakeorpoweron"
+# Optionally reserve additional one-off wake events every interval inside each
+# window, so a Mac that fell asleep during a window (a missed 08:00 wake, a
+# manual sleep, AC unplugged and later restored) is back within one interval.
+# On battery with require_ac = true it goes back to sleep after the idle timer.
+# interval = "1h"
 
 [[guards.process]]
 name = "github-actions-job"

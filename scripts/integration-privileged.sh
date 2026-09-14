@@ -50,6 +50,7 @@ assert_exit() { # expected description command...
 sleep_disabled() { /usr/bin/pmset -g | awk '$1 == "SleepDisabled" {print $2}' | grep . || echo 0; }
 repeating()      { /usr/bin/pmset -g sched | awk '/Repeating power events:/{f=1;next} /Scheduled power events:/{f=0} f' | sed 's/^ *//' | tr '\n' ';'; }
 loaded()         { /bin/launchctl print "system/$LABEL" >/dev/null 2>&1 && echo yes || echo no; }
+owned_events()   { /usr/bin/pmset -g sched | grep -c "by '$LABEL'" || true; }
 status_field()   { grep -oE "\"$1\": *(\"[^\"]*\"|[a-z0-9]+)" "$STATUS" 2>/dev/null | head -1 | sed -E 's/^"[^"]*": *//; s/^"//; s/"$//' || true; }
 wait_status() {  # field value
   local i
@@ -80,6 +81,7 @@ enabled = true
 days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 time = "08:00"
 action = "wakeorpoweron"
+interval = "1h"
 [[guards.process]]
 name = "never-running"
 executable = "/nonexistent/schlaflos-integration-guard"
@@ -114,6 +116,8 @@ assert_eq "$(stat -f '%Su:%Sg %Lp' "/Library/LaunchDaemons/$LABEL.plist")" "root
 if wait_status reason scheduled_window; then ok "first reconciliation reached scheduled_window"; else fail "status never reached scheduled_window: $(cat "$STATUS" 2>/dev/null)"; fi
 assert_eq "$(sleep_disabled)" 1 "disablesleep inside window"
 assert_contains "$(repeating)" "wakepoweron at 8:00AM every day" "repeating schedule"
+if [[ "$(owned_events)" -gt 0 ]]; then ok "one-off wake events owned by schlaflos: $(owned_events)"; else fail "no one-off wake events scheduled"; fi
+assert_eq "$(status_field wake_events_scheduled)" "$(owned_events)" "status wake_events_scheduled matches pmset"
 assert_eq "$(stat -f '%Su:%Sg %Lp' "$STATUS")" "root:wheel 644" "status ownership/mode"
 assert_exit 0 "status" "$BIN" status
 assert_exit 0 "status --json" "$BIN" status --json
@@ -127,6 +131,7 @@ assert_exit 0 "config apply outside" "$BIN" config apply "$WORK/outside.toml"
 if wait_status reason outside_window; then ok "reconciliation reached outside_window"; else fail "status never reached outside_window"; fi
 assert_eq "$(sleep_disabled)" "$PRE_SLEEP" "disablesleep restored to baseline outside window"
 assert_eq "$(repeating)" "$PRE_REPEAT" "repeating schedule handed back"
+assert_eq "$(owned_events)" 0 "one-off wake events released when interval disabled"
 
 log "drift detection"
 /usr/bin/pmset -a disablesleep 1
@@ -141,6 +146,7 @@ assert_exit 0 "emergency-off" "$BIN" emergency-off
 assert_eq "$(loaded)" no "launchd unloaded"
 assert_eq "$(sleep_disabled)" 0 "disablesleep forced to 0"
 assert_eq "$(repeating)" "$PRE_REPEAT" "owned wake schedule released"
+assert_eq "$(owned_events)" 0 "one-off wake events cancelled by emergency-off"
 assert_eq "$(status_field mode)" emergency_off "status mode"
 if [[ -e "/Library/Application Support/schlaflos/config.toml" ]]; then ok "configuration kept"; else fail "configuration removed by emergency-off"; fi
 assert_exit 0 "doctor reports without failing" "$BIN" doctor
@@ -155,6 +161,7 @@ assert_exit 0 "uninstall" "$BIN" uninstall
 assert_eq "$(loaded)" no "launchd unloaded"
 assert_eq "$(sleep_disabled)" "$PRE_SLEEP" "disablesleep restored"
 assert_eq "$(repeating)" "$PRE_REPEAT" "repeating schedule restored"
+assert_eq "$(owned_events)" 0 "one-off wake events cancelled by uninstall"
 for p in "/Library/LaunchDaemons/$LABEL.plist" "/Library/Application Support/schlaflos" /private/var/db/schlaflos; do
   if [[ -e "$p" ]]; then fail "$p still exists"; else ok "$p removed"; fi
 done

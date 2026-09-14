@@ -133,6 +133,8 @@ type Status struct {
 	LastError           *StatusError `json:"last_error,omitempty"`
 	WakeInstalled       *string      `json:"wake_installed"`
 	WakeObserved        *string      `json:"wake_observed"`
+	WakeEventsScheduled int          `json:"wake_events_scheduled"`
+	NextWakeEvent       *time.Time   `json:"next_wake_event,omitempty"`
 	RunOK               bool         `json:"run_ok"`
 }
 

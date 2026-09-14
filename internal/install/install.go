@@ -18,6 +18,7 @@ import (
 	"github.com/nozomemein/schlaflos/internal/layout"
 	"github.com/nozomemein/schlaflos/internal/platform/macos/launchd"
 	"github.com/nozomemein/schlaflos/internal/platform/macos/wake"
+	"github.com/nozomemein/schlaflos/internal/platform/macos/wakeevents"
 	"github.com/nozomemein/schlaflos/internal/reconcile"
 	"github.com/nozomemein/schlaflos/internal/safefs"
 	"github.com/nozomemein/schlaflos/internal/state"
@@ -33,12 +34,14 @@ type LaunchdManager interface {
 
 // Installer holds the boundaries used by the lifecycle commands.
 type Installer struct {
-	Layout      layout.Layout
-	FS          safefs.Checker
-	Store       state.Store
-	Clock       func() time.Time
-	Power       reconcile.PowerAdapter
-	Wake        reconcile.WakeAdapter
+	Layout layout.Layout
+	FS     safefs.Checker
+	Store  state.Store
+	Clock  func() time.Time
+	Power  reconcile.PowerAdapter
+	Wake   reconcile.WakeAdapter
+	// Events cancels the one-off wake events owned by schlaflos. Nil skips it.
+	Events      wakeevents.Scheduler
 	Launchd     LaunchdManager
 	Log         *log.Logger
 	ToolVersion string
@@ -223,6 +226,8 @@ func (i *Installer) Uninstall(ctx context.Context) error {
 		i.logf("unloaded LaunchDaemon")
 	}
 
+	errs = append(errs, i.cancelOwnedEvents(ctx)...)
+
 	st, err := i.Store.LoadState()
 	switch {
 	case err == nil:
@@ -262,6 +267,8 @@ func (i *Installer) EmergencyOff(ctx context.Context) error {
 	} else {
 		i.logf("unloaded LaunchDaemon; configuration is kept")
 	}
+
+	errs = append(errs, i.cancelOwnedEvents(ctx)...)
 
 	st, err := i.Store.LoadState()
 	if err != nil {
@@ -502,6 +509,31 @@ func (i *Installer) restoreBaselines(ctx context.Context, st *state.State) []err
 				}
 			}
 		}
+	}
+	return errs
+}
+
+// cancelOwnedEvents removes every one-off wake event scheduled under the
+// schlaflos owner identifier. Events of other owners are never touched.
+func (i *Installer) cancelOwnedEvents(ctx context.Context) []error {
+	if i.Events == nil {
+		return nil
+	}
+	all, err := i.Events.List(ctx)
+	if err != nil {
+		return []error{err}
+	}
+	var errs []error
+	n := 0
+	for _, e := range wakeevents.Owned(all) {
+		if err := i.Events.Cancel(ctx, e); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		n++
+	}
+	if n > 0 {
+		i.logf("cancelled %d one-off wake event(s)", n)
 	}
 	return errs
 }

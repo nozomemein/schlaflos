@@ -82,6 +82,11 @@ The baseline is written atomically before the first system mutation. Mutations a
 state updates are ordered so that an interrupted process can distinguish an owned
 value from an external value on the next run.
 
+One-off wake events are the exception to ledger-based ownership: every event
+`schlaflos` reserves carries its own identifier as the owner, and it only ever
+lists, cancels, or replaces events with that owner. Events reserved by other
+software are never modified.
+
 While installed, `schlaflos` treats the settings it manages as exclusive resources
 and reconciles drift to policy. On uninstall, it restores a baseline only if the
 current value still matches the last value written by `schlaflos`. A mismatch is

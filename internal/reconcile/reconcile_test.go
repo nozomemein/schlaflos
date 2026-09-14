@@ -12,6 +12,7 @@ import (
 	"github.com/nozomemein/schlaflos/internal/layout"
 	"github.com/nozomemein/schlaflos/internal/platform/macos/power"
 	"github.com/nozomemein/schlaflos/internal/platform/macos/wake"
+	"github.com/nozomemein/schlaflos/internal/platform/macos/wakeevents"
 	"github.com/nozomemein/schlaflos/internal/processguard"
 	"github.com/nozomemein/schlaflos/internal/safefs"
 	"github.com/nozomemein/schlaflos/internal/state"
@@ -84,6 +85,9 @@ days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 time = "08:00"
 `
 
+const cfgInterval = cfgWake + `interval = "1h"
+`
+
 var (
 	noon     = time.Date(2026, 9, 14, 12, 0, 0, 0, time.Local)
 	midnight = time.Date(2026, 9, 14, 0, 30, 0, 0, time.Local)
@@ -91,12 +95,13 @@ var (
 )
 
 type harness struct {
-	deps  Deps
-	power *fakePower
-	wake  *fakeWake
-	procs *fakeProcs
-	store state.Store
-	logs  *strings.Builder
+	deps   Deps
+	power  *fakePower
+	wake   *fakeWake
+	events *wakeevents.Fake
+	procs  *fakeProcs
+	store  state.Store
+	logs   *strings.Builder
 }
 
 func newHarness(t *testing.T, cfgTOML string, baselineDisabled bool, wakeBaseline wake.Schedule) *harness {
@@ -126,16 +131,17 @@ func newHarness(t *testing.T, cfgTOML string, baselineDisabled bool, wakeBaselin
 		t.Fatal(err)
 	}
 	h := &harness{
-		power: &fakePower{source: power.SourceAC, disabled: baselineDisabled},
-		wake:  &fakeWake{current: wakeBaseline},
-		procs: &fakeProcs{},
-		store: store,
-		logs:  &strings.Builder{},
+		power:  &fakePower{source: power.SourceAC, disabled: baselineDisabled},
+		wake:   &fakeWake{current: wakeBaseline},
+		events: &wakeevents.Fake{},
+		procs:  &fakeProcs{},
+		store:  store,
+		logs:   &strings.Builder{},
 	}
 	h.deps = Deps{
 		Layout: lay, FS: fs, Store: store,
 		Clock: func() time.Time { return noon },
-		Power: h.power, Procs: h.procs, Wake: h.wake,
+		Power: h.power, Procs: h.procs, Wake: h.wake, Events: h.events,
 		Log: log.New(h.logs, "", 0),
 	}
 	return h
@@ -553,4 +559,91 @@ func mustRead(t *testing.T, path string) []byte {
 		t.Fatal(err)
 	}
 	return data
+}
+
+func TestWakeEventsLifecycle(t *testing.T) {
+	foreign := wakeevents.Event{Time: noon.Add(3 * time.Hour), Owner: "com.apple.alarm", Type: "wake"}
+	h := newHarness(t, cfgInterval, false, wake.Schedule{})
+	h.events.Events = []wakeevents.Event{foreign}
+	status, err := Run(context.Background(), h.deps)
+	if err != nil {
+		t.Fatalf("Run: %v\n%s", err, h.logs)
+	}
+	// Window 08:00-20:00 hourly from noon: 13:00..19:00 today (7) and
+	// 08:00..12:00 tomorrow (5) within the inclusive 24h horizon.
+	if status.WakeEventsScheduled != 12 || len(h.events.Scheduled) != 12 {
+		t.Fatalf("scheduled = %d (%d calls)", status.WakeEventsScheduled, len(h.events.Scheduled))
+	}
+	if status.NextWakeEvent == nil || !status.NextWakeEvent.Equal(noon.Add(time.Hour)) {
+		t.Fatalf("next wake event = %v", status.NextWakeEvent)
+	}
+	for _, e := range h.events.Scheduled {
+		if e.Owner != wakeevents.Owner || e.Type != "wakepoweron" {
+			t.Fatalf("bad event %+v", e)
+		}
+	}
+	if len(h.events.Cancelled) != 0 {
+		t.Fatalf("foreign event touched: %v", h.events.Cancelled)
+	}
+
+	// Idempotent.
+	h.events.Scheduled = nil
+	Run(context.Background(), h.deps)
+	if len(h.events.Scheduled) != 0 || len(h.events.Cancelled) != 0 {
+		t.Fatalf("second run mutated: +%d -%d", len(h.events.Scheduled), len(h.events.Cancelled))
+	}
+
+	// An hour later the 13:00 event has fired and one more fits the horizon.
+	h.deps.Clock = func() time.Time { return noon.Add(time.Hour + time.Second) }
+	h.events.Events = h.events.Events[:0]
+	for _, e := range append([]wakeevents.Event{foreign}, h.events.Scheduled...) {
+		h.events.Events = append(h.events.Events, e)
+	}
+	Run(context.Background(), h.deps)
+	if len(h.events.Cancelled) != 0 {
+		t.Fatalf("cancelled %v", h.events.Cancelled)
+	}
+
+	// Disabling the interval cancels every owned event and nothing else.
+	h.deps.FS.WriteFile(h.deps.Layout.ConfigPath, []byte(cfgWake), layout.ModeConfig)
+	status, err = Run(context.Background(), h.deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.WakeEventsScheduled != 0 || len(h.events.Events) != 1 || h.events.Events[0].Owner != "com.apple.alarm" {
+		t.Fatalf("owned events not released: %+v", h.events.Events)
+	}
+}
+
+func TestWakeEventsDryRunAndErrors(t *testing.T) {
+	h := newHarness(t, cfgInterval, false, wake.Schedule{})
+	h.deps.DryRun = true
+	status, err := Run(context.Background(), h.deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(h.events.Scheduled) != 0 || status.WakeEventsScheduled != 12 {
+		t.Fatalf("dry run scheduled=%d reported=%d", len(h.events.Scheduled), status.WakeEventsScheduled)
+	}
+	if !strings.Contains(h.logs.String(), "would cancel 0 and schedule 12") {
+		t.Fatalf("logs:\n%s", h.logs)
+	}
+
+	h2 := newHarness(t, cfgInterval, false, wake.Schedule{})
+	h2.events.ScheduleErr = errors.New("IOReturn 0xe00002c2")
+	status, err = Run(context.Background(), h2.deps)
+	if err == nil || status.LastError == nil || status.LastError.Category != CategoryWakeMutation {
+		t.Fatalf("err=%v status=%+v", err, status)
+	}
+	// The sleep setting is still managed.
+	if len(h2.power.sets) != 1 {
+		t.Fatalf("sets = %v", h2.power.sets)
+	}
+
+	h3 := newHarness(t, cfgInterval, false, wake.Schedule{})
+	h3.deps.Events = nil
+	status, err = Run(context.Background(), h3.deps)
+	if err != nil || status.WakeEventsScheduled != 0 {
+		t.Fatalf("nil scheduler: err=%v status=%+v", err, status)
+	}
 }

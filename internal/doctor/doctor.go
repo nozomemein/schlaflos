@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/nozomemein/schlaflos/internal/layout"
+	"github.com/nozomemein/schlaflos/internal/platform/macos/wakeevents"
 	"github.com/nozomemein/schlaflos/internal/reconcile"
 	"github.com/nozomemein/schlaflos/internal/safefs"
 	"github.com/nozomemein/schlaflos/internal/state"
@@ -40,11 +41,13 @@ type LaunchdQuerier interface {
 
 // Doctor holds the read-only boundaries.
 type Doctor struct {
-	Layout  layout.Layout
-	FS      safefs.Checker
-	Store   state.Store
-	Power   reconcile.PowerAdapter
-	Wake    reconcile.WakeAdapter
+	Layout layout.Layout
+	FS     safefs.Checker
+	Store  state.Store
+	Power  reconcile.PowerAdapter
+	Wake   reconcile.WakeAdapter
+	// Events lists one-off wake events; nil skips the check.
+	Events  wakeevents.Scheduler
 	Launchd LaunchdQuerier
 	IsRoot  bool
 	Clock   func() time.Time
@@ -161,6 +164,23 @@ func (d Doctor) Run(ctx context.Context) ([]Check, bool) {
 		add(Warn, "wake schedule", "pmset reports %s but schlaflos installs %s", observedWake, *status.WakeInstalled)
 	} else {
 		add(OK, "wake schedule", "pmset reports %s", observedWake)
+	}
+
+	if d.Events != nil {
+		all, err := d.Events.List(ctx)
+		if err != nil {
+			add(Fail, "wake events", "%v", err)
+		} else {
+			owned := wakeevents.Owned(all)
+			switch {
+			case status != nil && status.WakeEventsScheduled != len(owned):
+				add(Warn, "wake events", "%d owned one-off event(s) scheduled but the last reconciliation recorded %d; pending reconciliation", len(owned), status.WakeEventsScheduled)
+			case len(owned) == 0:
+				add(OK, "wake events", "no one-off wake events owned by schlaflos")
+			default:
+				add(OK, "wake events", "%d one-off wake event(s) owned by schlaflos, next at %s", len(owned), owned[0].Time.Local().Format(time.RFC3339))
+			}
+		}
 	}
 
 	if d.IsRoot {

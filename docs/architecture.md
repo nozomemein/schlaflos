@@ -20,9 +20,9 @@ v1 will be written in Go.
 The program is primarily configuration parsing, deterministic policy evaluation,
 process inspection, and invocation of a small set of macOS commands. Go provides
 a straightforward single-binary distribution model and can execute fixed argument
-vectors without invoking a shell. Rust would also be viable, especially if direct
-IOKit integration becomes a near-term requirement, but it adds complexity without
-materially improving the first version's safety or behavior.
+vectors without invoking a shell. Rust would also be viable, but it adds complexity without materially
+improving the first version's safety or behavior. The one direct IOKit call
+(one-off wake events) is a small cgo binding around three functions.
 
 This decision can be revisited if the roadmap gains either of these requirements:
 
@@ -134,9 +134,25 @@ The reconciler adds two codes of its own outside the policy function:
 
 ## 5. Wake scheduling
 
-Wake scheduling is independent of sleep inhibition. v1 supports one recurring
-`wakeorpoweron` schedule because macOS `pmset repeat` supports only one repeating
-on/off pair.
+Wake scheduling is independent of sleep inhibition. Two mechanisms exist:
+
+1. One recurring `wakeorpoweron` schedule through `pmset repeat`, which macOS
+   limits to a single repeating on/off pair. It is the durable daily anchor: it
+   survives however long the Mac stays off.
+2. Optional one-off wake events reserved through the IOKit
+   `IOPMSchedulePowerEvent` API at every `wake.interval` inside each window,
+   for the next 24 hours. They bring a Mac that fell asleep during a window
+   back within one interval, after a missed anchor wake, a manual sleep, or AC
+   power that was removed and later restored. The reconciliation that runs on
+   wake then decides whether the Mac stays awake; on battery with `require_ac`
+   it returns to sleep after the idle timer.
+
+The one-off events carry `io.github.nozomemein.schlaflos` as their owner
+identifier. Ownership is therefore established by the event itself, not by the
+ledger: reconciliation lists the owned events, cancels those outside the plan,
+and reserves the missing ones; `emergency-off` and `uninstall` cancel every
+owned event and never touch events of other owners. The API is a user-space
+IOKit call made through cgo; no system extension is involved.
 
 The wake schedule is reconciled idempotently whenever `schlaflos` is already
 running: the current `pmset` schedule is read, compared with the desired schedule,
@@ -306,6 +322,10 @@ Secrets are not valid configuration values. Authentication tokens, signing
 material, runner credentials, and arbitrary environment variables are outside the
 schema and must never be copied into the installed configuration.
 
+`wake.interval` enables the one-off wake events described in section 5. It
+must be a whole number of minutes between 5 minutes and 12 hours and requires at
+least one window, because events are reserved inside windows only.
+
 Process guards match a canonical executable path, not a substring of a shell
 command line. The snapshot comes from `/bin/ps -axo pid=,comm=`, whose `comm`
 column on macOS is the executable path passed to `execve`; the configured path
@@ -329,6 +349,7 @@ internal/safefs/               path-chain verification, atomic writes, lock
 internal/platform/macos/cmdrun/ fixed-path subprocess execution and test fake
 internal/platform/macos/power/ AC state and sleep-inhibition adapter
 internal/platform/macos/wake/  pmset schedule inspection and mutation
+internal/platform/macos/wakeevents/ one-off wake events through IOKit (cgo)
 internal/platform/macos/launchd/ plist rendering and service management
 packaging/launchd/             embedded LaunchDaemon plist template
 examples/                      example configuration
@@ -415,7 +436,7 @@ by the test suite.
 - remote control or a network API;
 - arbitrary scripts, lifecycle hooks, or plugins;
 - a graphical interface;
-- multiple macOS wake schedules;
+- more than one recurring `pmset repeat` schedule;
 - automatic self-update.
 
 These omissions keep the initial public release small enough to audit and make its

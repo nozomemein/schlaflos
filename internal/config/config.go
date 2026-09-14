@@ -40,6 +40,13 @@ const (
 	MaxPollInterval     = time.Hour
 )
 
+// Wake interval bounds. The lower bound keeps a battery-powered Mac from
+// being woken continuously; the upper bound keeps the setting meaningful.
+const (
+	MinWakeInterval = 5 * time.Minute
+	MaxWakeInterval = 12 * time.Hour
+)
+
 // MaxSize bounds the configuration file size.
 const MaxSize = 256 * 1024
 
@@ -90,12 +97,15 @@ func (w Window) HasDay(d time.Weekday) bool {
 	return false
 }
 
-// Wake describes the single recurring pmset wake event.
+// Wake describes the recurring pmset wake event and, optionally, one-off
+// wake events repeated at Interval inside every window so that a Mac that
+// fell asleep during a window is brought back within one interval.
 type Wake struct {
-	Enabled bool
-	Days    []time.Weekday
-	Time    Clock
-	Action  string
+	Enabled  bool
+	Days     []time.Weekday
+	Time     Clock
+	Action   string
+	Interval time.Duration
 }
 
 // Guards groups the workload guards.
@@ -197,10 +207,11 @@ type rawWindow struct {
 }
 
 type rawWake struct {
-	Enabled *bool    `toml:"enabled"`
-	Days    []string `toml:"days"`
-	Time    *string  `toml:"time"`
-	Action  *string  `toml:"action"`
+	Enabled  *bool    `toml:"enabled"`
+	Days     []string `toml:"days"`
+	Time     *string  `toml:"time"`
+	Action   *string  `toml:"action"`
+	Interval *string  `toml:"interval"`
 }
 
 type rawGuards struct {
@@ -321,6 +332,22 @@ func (r raw) validate() (*Config, error) {
 			default:
 				return nil, fmt.Errorf("wake.action %q must be one of wakeorpoweron, wake, poweron", *r.Wake.Action)
 			}
+		}
+		if r.Wake.Interval != nil {
+			d, err := time.ParseDuration(*r.Wake.Interval)
+			if err != nil {
+				return nil, fmt.Errorf("wake.interval %q is not a valid duration", *r.Wake.Interval)
+			}
+			if d < MinWakeInterval || d > MaxWakeInterval {
+				return nil, fmt.Errorf("wake.interval %q must be between %s and %s", *r.Wake.Interval, MinWakeInterval, MaxWakeInterval)
+			}
+			if d%time.Minute != 0 {
+				return nil, fmt.Errorf("wake.interval %q must be a whole number of minutes", *r.Wake.Interval)
+			}
+			if len(cfg.Windows) == 0 {
+				return nil, errors.New("wake.interval requires at least one window; events are scheduled inside windows only")
+			}
+			cfg.Wake.Interval = d
 		}
 		if cfg.Wake.Enabled {
 			days, err := ParseDays(r.Wake.Days)

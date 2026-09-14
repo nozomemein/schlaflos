@@ -20,6 +20,7 @@ import (
 	"github.com/nozomemein/schlaflos/internal/layout"
 	"github.com/nozomemein/schlaflos/internal/platform/macos/power"
 	"github.com/nozomemein/schlaflos/internal/platform/macos/wake"
+	"github.com/nozomemein/schlaflos/internal/platform/macos/wakeevents"
 	"github.com/nozomemein/schlaflos/internal/policy"
 	"github.com/nozomemein/schlaflos/internal/processguard"
 	"github.com/nozomemein/schlaflos/internal/safefs"
@@ -48,9 +49,20 @@ type Deps struct {
 	Power  PowerAdapter
 	Procs  processguard.Inspector
 	Wake   WakeAdapter
+	// Events schedules one-off wake events. Nil disables interval wakes.
+	Events wakeevents.Scheduler
 	Log    *log.Logger
 	DryRun bool
 }
+
+// One-off wake events are reserved this far ahead, and never closer to now
+// than the margin. The horizon exceeds the poll interval by orders of
+// magnitude so a Mac that sleeps through several reconciliations still has
+// reservations waiting.
+const (
+	WakeEventHorizon = 24 * time.Hour
+	WakeEventMargin  = time.Minute
+)
 
 // Error categories recorded in the ledger and projected to status.
 const (
@@ -198,6 +210,7 @@ func (r *run) execute(ctx context.Context) (*state.Status, error) {
 			r.applySleep(ctx, desired, observedSleep, sleepErr, string(decision.Reason))
 		}
 		r.applyWake(ctx, cfg, observedWake, wakeErr)
+		r.applyWakeEvents(ctx, cfg)
 	}
 
 	r.status.LastTransition = r.st.LastTransition
@@ -340,6 +353,88 @@ func (r *run) applyWake(ctx context.Context, cfg *config.Config, observed wake.S
 	r.Log.Printf("set wake schedule to %s (was %s)", target, observed)
 	if err := r.Store.SaveState(r.st); err != nil {
 		r.record(CategoryStatePersist, fmt.Errorf("record wake schedule write: %w", err))
+	}
+}
+
+// applyWakeEvents makes the set of one-off wake events owned by schlaflos
+// equal to the plan: interval wakes inside every window for the next
+// horizon, or nothing when interval wakes are disabled. Ownership is carried
+// by the event's owner identifier, so no ledger entry is needed.
+func (r *run) applyWakeEvents(ctx context.Context, cfg *config.Config) {
+	if r.Events == nil {
+		return
+	}
+	all, err := r.Events.List(ctx)
+	if err != nil {
+		r.record(CategoryWakeRead, err)
+		return
+	}
+	observed := wakeevents.Owned(all)
+
+	var desired []wakeevents.Event
+	if cfg.Wake.Enabled && cfg.Wake.Interval > 0 {
+		typ := wakeevents.IOKitType(cfg.Wake.Action)
+		for _, t := range policy.PlanWakeEvents(cfg.Windows, cfg.Wake.Interval, r.now, WakeEventMargin, WakeEventHorizon) {
+			desired = append(desired, wakeevents.Event{Time: t, Owner: wakeevents.Owner, Type: typ})
+		}
+	}
+
+	want := map[string]bool{}
+	for _, e := range desired {
+		want[e.Key()] = true
+	}
+	have := map[string]bool{}
+	var extra []wakeevents.Event
+	for _, e := range observed {
+		have[e.Key()] = true
+		if !want[e.Key()] {
+			extra = append(extra, e)
+		}
+	}
+	var missing []wakeevents.Event
+	for _, e := range desired {
+		if !have[e.Key()] {
+			missing = append(missing, e)
+		}
+	}
+
+	if len(extra) > 0 || len(missing) > 0 {
+		if r.DryRun {
+			r.Log.Printf("dry-run: would cancel %d and schedule %d one-off wake events", len(extra), len(missing))
+		} else {
+			for _, e := range extra {
+				if err := r.Events.Cancel(ctx, e); err != nil {
+					r.record(CategoryWakeMutation, err)
+				} else {
+					r.Log.Printf("cancelled wake event %s at %s", e.Type, e.Time.Format(time.RFC3339))
+				}
+			}
+			for _, e := range missing {
+				if err := r.Events.Schedule(ctx, e); err != nil {
+					r.record(CategoryWakeMutation, err)
+				} else {
+					r.Log.Printf("scheduled wake event %s at %s", e.Type, e.Time.Format(time.RFC3339))
+				}
+			}
+			all, err = r.Events.List(ctx)
+			if err != nil {
+				r.record(CategoryWakeRead, err)
+				return
+			}
+			observed = wakeevents.Owned(all)
+		}
+	}
+
+	if r.DryRun {
+		observed = desired
+	}
+	r.status.WakeEventsScheduled = len(observed)
+	for _, e := range observed {
+		if e.Time.After(r.now) {
+			t := e.Time.UTC()
+			r.status.NextWakeEvent = &t
+			break
+		}
 	}
 }
 

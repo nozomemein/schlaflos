@@ -17,15 +17,32 @@ applies the minimum change to the system-wide `pmset disablesleep` setting.
 - Keep privileged behavior narrow: no shell execution or arbitrary root hooks.
 - Install and remove cleanly without overwriting unrelated `pmset` schedules.
 
+## Install
+
+```sh
+go install github.com/nozomemein/schlaflos/cmd/schlaflos@latest
+```
+
+This needs Go 1.26 and the Xcode Command Line Tools (the binary links IOKit
+through cgo). Or build from a checkout with `just build`.
+
 ## Usage
 
 ```sh
 schlaflos init                                  # writes ./schlaflos.toml
 schlaflos config check ./schlaflos.toml
-sudo schlaflos install --config ./schlaflos.toml
+sudo schlaflos install --config ./schlaflos.toml   # copies the binary into place
 schlaflos status
 schlaflos doctor
 ```
+
+The binary you run `install` from can live anywhere: it is copied to
+`/Library/Application Support/schlaflos/bin/schlaflos` and linked from
+`/usr/local/bin/schlaflos`.
+
+Set `wake.interval` (for example `"1h"`) to reserve extra wake events inside
+each window so a Mac that fell asleep, or lost and regained AC power, is back
+within one interval.
 
 Later changes go through `sudo schlaflos config apply PATH`. `sudo schlaflos
 emergency-off` forces normal sleep and unloads the service; `sudo schlaflos

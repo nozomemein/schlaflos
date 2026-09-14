@@ -13,6 +13,7 @@ import (
 	"github.com/nozomemein/schlaflos/internal/layout"
 	"github.com/nozomemein/schlaflos/internal/platform/macos/power"
 	"github.com/nozomemein/schlaflos/internal/platform/macos/wake"
+	"github.com/nozomemein/schlaflos/internal/platform/macos/wakeevents"
 	"github.com/nozomemein/schlaflos/internal/safefs"
 	"github.com/nozomemein/schlaflos/internal/state"
 )
@@ -94,6 +95,7 @@ type env struct {
 	power   *fakePower
 	wake    *fakeWake
 	launchd *fakeLaunchd
+	events  *wakeevents.Fake
 	logs    *strings.Builder
 	cfgPath string
 }
@@ -114,11 +116,11 @@ func newEnv(t *testing.T, cfg string) *env {
 	cfgPath := filepath.Join(root, "schlaflos.toml")
 	os.WriteFile(cfgPath, []byte(cfg), 0o644)
 	fs := safefs.Checker{UID: os.Getuid(), GID: os.Getgid(), Root: root}
-	e := &env{root: root, lay: lay, power: &fakePower{}, wake: &fakeWake{}, launchd: &fakeLaunchd{}, logs: &strings.Builder{}, cfgPath: cfgPath}
+	e := &env{root: root, lay: lay, power: &fakePower{}, wake: &fakeWake{}, launchd: &fakeLaunchd{}, events: &wakeevents.Fake{}, logs: &strings.Builder{}, cfgPath: cfgPath}
 	e.inst = &Installer{
 		Layout: lay, FS: fs, Store: state.Store{Layout: lay, FS: fs},
 		Clock: func() time.Time { return time.Date(2026, 9, 14, 9, 0, 0, 0, time.UTC) },
-		Power: e.power, Wake: e.wake, Launchd: e.launchd,
+		Power: e.power, Wake: e.wake, Events: e.events, Launchd: e.launchd,
 		Log: log.New(e.logs, "", 0), ToolVersion: "test", SourceBinary: src,
 	}
 	return e
@@ -390,5 +392,26 @@ func TestApply(t *testing.T) {
 	}
 	if data, _ := os.ReadFile(e.lay.ConfigPath); string(data) != cfgNoWake {
 		t.Fatal("configuration not replaced")
+	}
+}
+
+func TestUninstallAndEmergencyOffCancelOwnedEventsOnly(t *testing.T) {
+	foreign := wakeevents.Event{Time: time.Now().Add(time.Hour), Owner: "com.apple.alarm", Type: "wake"}
+	ours := wakeevents.Event{Time: time.Now().Add(2 * time.Hour), Owner: wakeevents.Owner, Type: "wakepoweron"}
+	e := newEnv(t, cfgTOML)
+	e.inst.Install(context.Background(), e.cfgPath, false)
+	e.events.Events = []wakeevents.Event{foreign, ours}
+	if err := e.inst.EmergencyOff(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.events.Events) != 1 || e.events.Events[0].Owner != "com.apple.alarm" {
+		t.Fatalf("events after emergency-off = %+v", e.events.Events)
+	}
+	e.events.Events = []wakeevents.Event{foreign, ours}
+	if err := e.inst.Uninstall(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.events.Events) != 1 || e.events.Events[0].Owner != "com.apple.alarm" {
+		t.Fatalf("events after uninstall = %+v", e.events.Events)
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -23,14 +24,27 @@ import (
 	"github.com/nozomemein/schlaflos/internal/platform/macos/launchd"
 	"github.com/nozomemein/schlaflos/internal/platform/macos/power"
 	"github.com/nozomemein/schlaflos/internal/platform/macos/wake"
+	"github.com/nozomemein/schlaflos/internal/platform/macos/wakeevents"
 	"github.com/nozomemein/schlaflos/internal/processguard"
 	"github.com/nozomemein/schlaflos/internal/reconcile"
 	"github.com/nozomemein/schlaflos/internal/safefs"
 	"github.com/nozomemein/schlaflos/internal/state"
 )
 
-// version is set with -ldflags "-X main.version=...".
+// version is set with -ldflags "-X main.version=..."; a binary built by
+// `go install module@version` falls back to the module version recorded by
+// the Go toolchain.
 var version = "dev"
+
+func buildVersion() string {
+	if version != "dev" {
+		return version
+	}
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+	return version
+}
 
 const usage = `schlaflos keeps a Mac awake during scheduled windows or while selected
 workloads run, and manages a recurring pmset wake event.
@@ -80,7 +94,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		isRoot:  os.Geteuid() == 0,
 		clock:   time.Now,
 		exe:     exe,
-		version: version,
+		version: buildVersion(),
 	}
 	return a.dispatch(args)
 }
@@ -150,6 +164,7 @@ func (a *app) installer() *install.Installer {
 		Clock:        a.clock,
 		Power:        a.powerAdapter(),
 		Wake:         a.wakeAdapter(),
+		Events:       wakeevents.IOKit{},
 		Launchd:      a.launchdManager(),
 		Log:          log.New(a.stdout, "", 0),
 		ToolVersion:  a.version,
@@ -239,6 +254,9 @@ func (a *app) describeConfig(cfg *config.Config) {
 	}
 	if cfg.Wake.Enabled {
 		fmt.Fprintf(a.stdout, "  wake:           %s\n", wake.FromConfig(cfg.Wake))
+		if cfg.Wake.Interval > 0 {
+			fmt.Fprintf(a.stdout, "  wake interval:  every %s inside windows\n", cfg.Wake.Interval)
+		}
 	} else {
 		fmt.Fprintf(a.stdout, "  wake:           disabled\n")
 	}
@@ -311,6 +329,14 @@ func printStatus(w io.Writer, st *state.Status) {
 	fmt.Fprintf(w, "  next transition:  %s\n", next)
 	fmt.Fprintf(w, "  wake installed:   %s\n", orNone(deref(st.WakeInstalled)))
 	fmt.Fprintf(w, "  wake observed:    %s\n", orDash(deref(st.WakeObserved)))
+	events := "none"
+	if st.WakeEventsScheduled > 0 {
+		events = fmt.Sprintf("%d scheduled", st.WakeEventsScheduled)
+		if st.NextWakeEvent != nil {
+			events += ", next " + st.NextWakeEvent.Local().Format(time.RFC3339)
+		}
+	}
+	fmt.Fprintf(w, "  wake events:      %s\n", events)
 	last := "none"
 	if st.LastTransition != nil {
 		last = fmt.Sprintf("%s disablesleep %d -> %d (%s)", st.LastTransition.At.Local().Format(time.RFC3339), b2i(st.LastTransition.From), b2i(st.LastTransition.To), st.LastTransition.Reason)
@@ -337,6 +363,7 @@ func (a *app) cmdDoctor(args []string) int {
 		Store:   a.store(),
 		Power:   a.powerAdapter(),
 		Wake:    a.wakeAdapter(),
+		Events:  wakeevents.IOKit{},
 		Launchd: a.launchdManager(),
 		IsRoot:  a.isRoot,
 		Clock:   a.clock,
@@ -418,6 +445,7 @@ func (a *app) cmdReconcile(args []string) int {
 		Power:  a.powerAdapter(),
 		Procs:  processguard.PS{Runner: a.runner},
 		Wake:   a.wakeAdapter(),
+		Events: wakeevents.IOKit{},
 		Log:    logger,
 		DryRun: dryRun,
 	}

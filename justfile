@@ -39,8 +39,8 @@ config-check path="examples/schlaflos.toml": build
 # Cross-compile release binaries into ./dist with SHA-256 checksums.
 dist:
     rm -rf dist && mkdir -p dist
-    GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "{{ldflags}}" -o dist/schlaflos-darwin-arm64 ./cmd/schlaflos
-    GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags "{{ldflags}}" -o dist/schlaflos-darwin-amd64 ./cmd/schlaflos
+    CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "{{ldflags}}" -o dist/schlaflos-darwin-arm64 ./cmd/schlaflos
+    CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags "{{ldflags}}" -o dist/schlaflos-darwin-amd64 ./cmd/schlaflos
     cd dist && shasum -a 256 schlaflos-darwin-* > SHA256SUMS
 
 clean:

@@ -25,8 +25,12 @@ func tokyo(t *testing.T) *time.Location {
 	return loc
 }
 
-func at(loc *time.Location, y int, m time.Month, d, h, min int) time.Time {
-	return time.Date(y, m, d, h, min, 0, 0, loc)
+func at(loc *time.Location, y int, m time.Month, d, h, min int, sec ...int) time.Time {
+	s := 0
+	if len(sec) > 0 {
+		s = sec[0]
+	}
+	return time.Date(y, m, d, h, min, s, 0, loc)
 }
 
 func TestEvaluateTable(t *testing.T) {

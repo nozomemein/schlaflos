@@ -9,6 +9,20 @@ security documents explain why each step behaves as it does.
 - An administrator account for `sudo`.
 - A workload whose executable path is stable, if process guards are used.
 
+## Get the binary
+
+Either build from a checkout or let the Go toolchain fetch and build it:
+
+```sh
+go install github.com/nozomemein/schlaflos/cmd/schlaflos@latest
+sudo "$(go env GOPATH)/bin/schlaflos" install --config ./schlaflos.toml
+```
+
+The binary links IOKit through cgo, so `go install` needs the Xcode Command
+Line Tools (`xcode-select --install`). `install` copies the running binary
+into `/Library/Application Support/schlaflos/bin`, so the `go install` output
+can live anywhere and is not referenced afterwards.
+
 ## Write and validate a configuration
 
 ```sh
@@ -29,6 +43,30 @@ is `/Users/ci/actions-runner/bin/Runner.Worker`. Check the path on the machine:
 ```sh
 ps -axo pid=,comm= | grep Runner.Worker
 ```
+
+### Interval wakes
+
+Inside a window `disablesleep = 1` prevents idle and lid-close sleep, but a
+Mac can still end up asleep: the daily wake failed, someone chose Sleep from
+the Apple menu, or AC power was removed and later restored (the reconciler
+drops its request within one poll interval on battery when `require_ac` is
+set, and this hardware offers no wake-on-power-change setting). Set
+`wake.interval` to reserve additional one-off wake events inside every window:
+
+```toml
+[wake]
+enabled = true
+days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+time = "08:00"
+interval = "1h"
+```
+
+The Mac is then back within one interval, and the reconciliation that runs on
+wake decides whether it stays up. On battery with `require_ac = true` it
+sleeps again after the idle timer, so the cost is a minute or two per
+interval. With `require_ac = false` it stays awake until the window ends,
+even in a bag. The events show up in `pmset -g sched` with the owner
+`io.github.nozomemein.schlaflos`.
 
 ## Install
 

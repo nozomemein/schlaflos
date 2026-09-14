@@ -94,37 +94,11 @@ func (d Doctor) Run(ctx context.Context) ([]Check, bool) {
 		}
 	}
 
-	var cfgPoll time.Duration
-	if d.IsRoot {
-		cfg, err := reconcile.LoadInstalledConfig(d.FS, d.Layout)
-		if err != nil {
-			add(Fail, "configuration", "%v", err)
-		} else {
-			cfgPoll = cfg.PollInterval
-			add(OK, "configuration", "valid (poll interval %s, %d window(s), %d process guard(s), wake enabled=%v)", cfg.PollInterval, len(cfg.Windows), len(cfg.Guards.Process), cfg.Wake.Enabled)
-		}
-		loaded, err := d.Launchd.Loaded(ctx)
-		switch {
-		case err != nil:
-			add(Fail, "launchd", "%v", err)
-		case loaded:
-			add(OK, "launchd", "%s is loaded", layout.Label)
-		default:
-			add(Fail, "launchd", "%s is not loaded (run `sudo schlaflos config apply %s` or reinstall)", layout.Label, d.Layout.ConfigPath)
-		}
-	} else {
-		add(Skip, "configuration", "requires root to read %s", d.Layout.ConfigPath)
-		add(Skip, "launchd", "requires root to query the system domain")
-	}
-
 	status, err := d.Store.ReadStatus()
 	if err != nil {
 		add(Fail, "status", "%v", err)
 	} else {
-		poll := cfgPoll
-		if poll == 0 && status.PollIntervalSeconds > 0 {
-			poll = time.Duration(status.PollIntervalSeconds) * time.Second
-		}
+		poll := time.Duration(status.PollIntervalSeconds) * time.Second
 		age := d.Clock().Sub(status.GeneratedAt)
 		switch {
 		case status.Mode == state.ModeEmergencyOff:
@@ -143,6 +117,32 @@ func (d Doctor) Run(ctx context.Context) ([]Check, bool) {
 		for _, g := range status.Degraded {
 			add(Warn, "degraded", "%s reported by the last reconciliation", g)
 		}
+	}
+
+	emergencyOff := status != nil && status.Mode == state.ModeEmergencyOff
+	if d.IsRoot {
+		cfg, err := reconcile.LoadInstalledConfig(d.FS, d.Layout)
+		if err != nil {
+			add(Fail, "configuration", "%v", err)
+		} else {
+			add(OK, "configuration", "valid (poll interval %s, %d window(s), %d process guard(s), wake enabled=%v)", cfg.PollInterval, len(cfg.Windows), len(cfg.Guards.Process), cfg.Wake.Enabled)
+		}
+		loaded, err := d.Launchd.Loaded(ctx)
+		switch {
+		case err != nil:
+			add(Fail, "launchd", "%v", err)
+		case loaded && emergencyOff:
+			add(Warn, "launchd", "%s is loaded although emergency-off was the last action; reconciliation has resumed", layout.Label)
+		case loaded:
+			add(OK, "launchd", "%s is loaded", layout.Label)
+		case emergencyOff:
+			add(Warn, "launchd", "%s is unloaded by emergency-off; resume with `sudo schlaflos config apply PATH`", layout.Label)
+		default:
+			add(Fail, "launchd", "%s is not loaded (run `sudo schlaflos config apply %s` or reinstall)", layout.Label, d.Layout.ConfigPath)
+		}
+	} else {
+		add(Skip, "configuration", "requires root to read %s", d.Layout.ConfigPath)
+		add(Skip, "launchd", "requires root to query the system domain")
 	}
 
 	// pmset is readable without privileges.

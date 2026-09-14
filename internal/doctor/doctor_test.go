@@ -122,3 +122,31 @@ func render(checks []Check) string {
 	}
 	return b.String()
 }
+
+func TestEmergencyOffIsWarnNotFail(t *testing.T) {
+	d, lay := newDoctor(t)
+	for _, dir := range []string{lay.BinDir, lay.StateDir, lay.LaunchDaemonsDir} {
+		os.MkdirAll(dir, 0o755)
+	}
+	d.FS.WriteFile(lay.Binary, []byte("bin"), layout.ModeBinary)
+	d.FS.WriteFile(lay.ConfigPath, []byte("version = 1\n"), layout.ModeConfig)
+	d.FS.WriteFile(lay.PlistPath, []byte("<plist/>"), layout.ModePlist)
+	st, _ := state.New(d.Clock(), "test")
+	st.SleepBaseline = &state.SleepRecord{At: d.Clock()}
+	st.WakeBaseline = &state.WakeRecord{At: d.Clock()}
+	d.Store.SaveState(st)
+	off := false
+	d.Store.WriteStatus(&state.Status{GeneratedAt: d.Clock(), Mode: state.ModeEmergencyOff, Observed: &off, Reason: "emergency_off", RunOK: true})
+	d.Launchd = fakeLaunchd{loaded: false}
+
+	checks, failed := d.Run(context.Background())
+	lv := levels(checks)
+	if failed || lv["launchd"] != Warn || lv["status"] != Warn {
+		t.Fatalf("emergency-off must warn, not fail:\n%s", render(checks))
+	}
+	// Unprivileged users see the status warning and no failure either.
+	d.IsRoot = false
+	if _, failed := d.Run(context.Background()); failed {
+		t.Fatal("unprivileged doctor failed during emergency-off")
+	}
+}

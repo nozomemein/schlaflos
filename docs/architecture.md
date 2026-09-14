@@ -1,0 +1,327 @@
+# schlaflos architecture
+
+Status: proposed for v1
+
+## 1. Purpose
+
+`schlaflos` keeps a macOS machine available during configured time windows and
+while selected local workloads are running. It can also configure a recurring
+macOS wake event. A typical use case is a Mac that serves as a self-hosted CI
+runner during the day but should otherwise retain normal sleep behavior.
+
+The first release is intentionally macOS-only. It favors a small, auditable
+privileged surface over cross-platform abstractions or a plugin system.
+
+## 2. Technology choice
+
+v1 will be written in Go.
+
+The program is primarily configuration parsing, deterministic policy evaluation,
+process inspection, and invocation of a small set of macOS commands. Go provides
+a straightforward single-binary distribution model and can execute fixed argument
+vectors without invoking a shell. Rust would also be viable, especially if direct
+IOKit integration becomes a near-term requirement, but it adds complexity without
+materially improving the first version's safety or behavior.
+
+This decision can be revisited if the roadmap gains either of these requirements:
+
+- direct and extensive macOS framework integration;
+- a committed Linux or Windows implementation.
+
+## 3. System model
+
+The installed system has two execution paths:
+
+1. A user invokes `schlaflos` to validate configuration, inspect status, install,
+   update, or remove the service.
+2. `launchd` invokes `schlaflos reconcile` at a fixed interval. Each invocation is
+   short-lived: it reads current inputs, calculates the desired state, applies the
+   minimum required change, writes a status snapshot, and exits.
+
+There is no permanently running custom daemon in v1. `launchd` already provides
+scheduling, crash handling, and ownership of the privileged process lifecycle.
+
+```text
+config.toml ───────────────┐
+clock ─────────────────────┤
+AC/battery state ──────────┼─> policy ─> desired state ─> macOS power adapter
+matching processes ────────┘                    │
+                                                └─> state.json
+
+launchd ── every N seconds ──> schlaflos reconcile
+pmset   ── recurring event ──> wake or power on
+```
+
+`launchd` intervals missed while the machine is asleep are not timers that wake
+the machine. Scheduled wake is therefore configured separately through `pmset`.
+
+### Sleep-inhibition mechanism
+
+v1 targets closed-lid Mac operation and therefore manages the system-wide
+`disablesleep` power setting rather than relying on a short-lived idle-sleep
+assertion. The macOS adapter invokes `/usr/bin/pmset` with fixed arguments and
+verifies the observed setting after every change.
+
+Because this is a global setting, installation records its pre-install value as
+the baseline. Releasing a `schlaflos` inhibition restores that baseline instead of
+blindly writing `0`. Uninstall follows the same rule. While installed,
+`schlaflos` is expected to be the only manager of `disablesleep`; `doctor` reports
+an external change as a conflict.
+
+## 4. Policy
+
+The central decision is a pure function that calculates whether `schlaflos`
+itself requests inhibition:
+
+```text
+prevent_sleep = power_allowed
+                AND (inside_any_window OR any_process_guard_active)
+```
+
+Where:
+
+- `power_allowed` is true when AC power is connected, or when `require_ac` is
+  disabled;
+- `inside_any_window` is true when local wall-clock time is inside at least one
+  configured window;
+- `any_process_guard_active` is true when at least one configured process guard
+  matches a running process.
+
+`require_ac` is an absolute safety condition. An active process guard does not keep
+the machine awake on battery when `require_ac = true`.
+
+When the request is false, the reconciler restores the recorded baseline. A
+pre-existing baseline of `disablesleep = 1` therefore remains enabled; the status
+output distinguishes the policy request from the effective system setting.
+
+For the common self-hosted runner setup, a window can keep the Mac available from
+08:00 to 20:00 every day, while a guard matching `Runner.Worker` lets a job that
+started before 20:00 finish. Removing AC power permits normal sleep immediately.
+
+### Window semantics
+
+- Times use the Mac's current local timezone.
+- Start is inclusive and end is exclusive.
+- Windows may cross midnight.
+- Day names refer to the day on which the window starts.
+- Daylight-saving transitions follow the operating system's local-time rules.
+- Unknown fields, malformed days, zero-length windows, and invalid durations are
+  configuration errors.
+
+Policy evaluation returns a stable reason code in addition to the desired state,
+for example `scheduled_window`, `active_process_guard`, `battery_power`, or
+`outside_window`.
+
+## 5. Wake scheduling
+
+Wake scheduling is independent of sleep inhibition. v1 supports one recurring
+`wakeorpoweron` schedule because macOS `pmset repeat` supports only one repeating
+on/off pair.
+
+The wake schedule is reconciled idempotently whenever `schlaflos` is already
+running: the current `pmset` schedule is read, compared with the desired schedule,
+and changed only when necessary. This guarantees the wake reservation, not the
+outcome of a past wake attempt.
+
+A sleeping Mac cannot run a local periodic check. Consequently, `launchd` cannot
+notice at 08:15 that an 08:00 wake was missed and wake the same machine. Supporting
+that recovery case would require an external always-on coordinator, such as a
+separate host capable of sending an appropriate network wake request. That is
+outside the v1 scope.
+
+After any boot or wake, including a late manual wake, reconciliation runs
+immediately. If the current time is inside an active window and the power policy
+allows it, sleep inhibition is enabled without waiting for the next interval.
+
+Installation must read the current schedule before changing it. If an unrelated
+schedule exists, `schlaflos` refuses to replace it unless the operator supplies
+`--replace-wake-schedule`. The schedule installed by `schlaflos` is recorded in
+the state file. Uninstall removes it only when the current schedule still matches
+that recorded value.
+
+A wake event can wake a sleeping Mac with power available. It cannot compensate
+for an unplugged and depleted machine, and a FileVault-protected Mac that fully
+powers off may still require interactive login.
+
+## 6. Privilege and security boundary
+
+The reconciler runs as root because changing system power behavior and installing
+a LaunchDaemon require elevated privileges. The privileged surface is deliberately
+narrow:
+
+- no shell is invoked;
+- subprocesses use fixed executable paths and explicit argument arrays;
+- configuration cannot define arbitrary commands or hooks;
+- privileged paths do not expand `~` or environment variables;
+- installed binaries and configuration are not user-writable;
+- writes use a temporary file, ownership and mode checks, then atomic rename;
+- symlinks are rejected for privileged configuration and state paths;
+- status redacts process arguments and reports only configured guard names.
+
+Configuration is validated before elevation for fast feedback and again by the
+privileged process before installation or application. An invalid installed
+configuration fails safe by requesting normal sleep behavior and recording an
+error rather than continuing a stale assertion indefinitely.
+
+Public repositories make this boundary especially important: configuration must
+never turn the root service into a generic command runner.
+
+## 7. Filesystem layout
+
+```text
+/usr/local/bin/schlaflos
+    User-facing executable (or symlink to the versioned binary).
+
+/usr/local/libexec/schlaflos/schlaflos
+    Root-owned executable invoked by launchd.
+
+/Library/Application Support/schlaflos/config.toml
+    Root-owned installed configuration.
+
+/Library/LaunchDaemons/io.github.nozomemein.schlaflos.plist
+    Root-owned launchd job.
+
+/var/db/schlaflos/state.json
+    Last observed state, transition, installed wake schedule, and error.
+```
+
+Recommended permissions are `root:wheel` with mode `0755` for directories and
+executables and `0644` for configuration and the LaunchDaemon plist. The state
+file should be `0600` unless a separate unprivileged status projection is added.
+
+## 8. Command-line interface
+
+Proposed public commands:
+
+```text
+schlaflos init
+schlaflos config check PATH
+schlaflos status [--json]
+schlaflos doctor
+sudo schlaflos install --config PATH [--replace-wake-schedule]
+sudo schlaflos config apply PATH [--replace-wake-schedule]
+sudo schlaflos emergency-off
+sudo schlaflos uninstall
+```
+
+Internal/service command:
+
+```text
+schlaflos reconcile [--dry-run]
+```
+
+`emergency-off` explicitly forces `disablesleep = 0` and unloads the LaunchDaemon
+without deleting configuration. This command intentionally overrides the recorded
+baseline and exists as a recovery control. `uninstall` restores the recorded
+pre-install baseline, then removes only artifacts owned by `schlaflos`.
+
+`status` reports:
+
+- evaluation time and next expected transition;
+- desired and observed inhibition state;
+- policy reason code;
+- AC or battery state;
+- active configured guard names;
+- last successful transition and last error;
+- installed and observed wake schedule.
+
+## 9. Configuration
+
+The v1 configuration format is versioned TOML. See
+[`examples/schlaflos.toml`](../examples/schlaflos.toml).
+
+Strict decoding is required: unknown keys are rejected rather than ignored. This
+prevents a typo in a safety-related option from silently changing behavior.
+
+Process guards match a canonical executable path, not a substring of a shell
+command line. This reduces false positives and avoids exposing full arguments in
+status output. More guard kinds may be added later, but v1 does not expose a plugin
+or arbitrary-script interface.
+
+## 10. Internal package boundaries
+
+```text
+cmd/schlaflos/                 CLI entry point
+internal/config/               TOML schema, decoding, validation
+internal/policy/               pure desired-state calculation and reason codes
+internal/reconcile/            orchestration and transition logic
+internal/processguard/         process snapshot and executable matching
+internal/state/                durable status snapshot and atomic persistence
+internal/platform/macos/power/ AC state and sleep-inhibition adapter
+internal/platform/macos/wake/  pmset schedule inspection and mutation
+internal/platform/macos/launchd/ plist rendering and service management
+packaging/launchd/             plist template or embedded source
+examples/                      example configuration
+docs/                          architecture and operational documentation
+```
+
+Interfaces should exist only at real operating-system boundaries: clock, power
+state, process inspection, wake scheduling, and state persistence. The policy
+package accepts values and returns a decision; it does not know about commands,
+files, or macOS.
+
+## 11. Reconciliation and failures
+
+Each reconciliation follows this sequence:
+
+1. Open and strictly validate the installed configuration.
+2. Read local time, power source, relevant processes, and observed sleep state.
+3. Evaluate policy without side effects.
+4. Apply a transition only if desired and observed states differ.
+5. Atomically persist a redacted status snapshot.
+
+Failure behavior:
+
+- Invalid configuration: restore the recorded pre-install baseline, record the
+  validation error, exit non-zero.
+- Power-source read failure: make no power mutation, record the error, exit
+  non-zero.
+- Process inspection failure: do not treat guards as active; record a degraded
+  status so the operator can see the loss of protection.
+- Mutation failure: retain the observed state, record the error, exit non-zero.
+- State-file failure: log to the launchd standard-error path and exit non-zero.
+
+`launchd` retries at the next interval. Reconciliation must be idempotent so that
+retries are harmless.
+
+## 12. Testing strategy
+
+The most important tests are policy table tests covering:
+
+- AC versus battery power;
+- before, at, and after window boundaries;
+- weekdays, weekends, overnight windows, and timezone transitions;
+- an active process after a window ends;
+- invalid and overlapping configuration;
+- stable reason codes.
+
+Platform adapters use captured command output and fixed argument assertions.
+Additional tests cover atomic state writes, symlink rejection, plist rendering,
+and ownership/mode validation.
+
+Privileged integration tests should run only on a dedicated Mac. They should verify
+install, repeated reconciliation, wake-schedule conflict handling,
+`emergency-off`, upgrade, and uninstall. A shared CI runner must not have its global
+power settings modified by the test suite.
+
+## 13. Delivery plan
+
+1. Define the versioned configuration model and pure policy package.
+2. Add read-only macOS adapters plus `config check`, `status`, and `doctor`.
+3. Implement `reconcile --dry-run` and durable state snapshots.
+4. Add sleep-state mutation and `emergency-off`.
+5. Add installation, LaunchDaemon management, and guarded wake scheduling.
+6. Exercise privileged integration tests on a dedicated Mac.
+7. Publish signed `darwin/arm64` and `darwin/amd64` binaries with checksums.
+
+## 14. Deliberate non-goals for v1
+
+- Linux or Windows support;
+- remote control or a network API;
+- arbitrary scripts, lifecycle hooks, or plugins;
+- a graphical interface;
+- multiple macOS wake schedules;
+- automatic self-update.
+
+These omissions keep the initial public release small enough to audit and make its
+root behavior understandable from the configuration alone.

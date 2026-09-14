@@ -1,0 +1,211 @@
+# schlaflos
+
+> schlaflos is a macOS command-line tool that keeps a Mac awake during configured
+> time windows or while selected processes run, and reserves wake events so the
+> Mac is up when the window starts. A root LaunchDaemon runs `schlaflos reconcile`
+> every poll interval; each run reads a TOML configuration, evaluates a pure
+> policy, and applies the minimum change to `pmset disablesleep` and the pmset
+> wake schedule. Typical use: a Mac that acts as a self-hosted CI runner during
+> the day and sleeps normally otherwise.
+
+This file is for AI assistants helping a person configure or operate schlaflos.
+Everything needed to write a valid configuration is below; the linked documents
+explain the design in depth.
+
+## What an assistant can do
+
+- Write or edit `schlaflos.toml` from a description such as "keep it awake on
+  weekdays 9 to 18, wake it at 8:55, and let a running GitHub Actions job
+  finish". Validate with `schlaflos config check PATH` (no root needed).
+- Explain the current state from `schlaflos status --json` (readable without
+  root) or `schlaflos doctor`.
+- Tell the person which command to run next. Commands that change the system
+  need `sudo`: `install`, `config apply`, `emergency-off`, `uninstall`,
+  `reconcile`.
+
+Never put credentials, tokens, or environment values into the configuration;
+the schema has no place for them and unknown keys are rejected.
+
+## Policy in one line
+
+```text
+prevent_sleep = (on AC power OR require_ac = false)
+                AND (inside a window OR a process guard matches a running process)
+```
+
+When `prevent_sleep` is false the Mac returns to its pre-install `disablesleep`
+value (the baseline), which is normally 0. A Mac on battery with
+`require_ac = true` is never kept awake, even by a matching process.
+
+## Configuration schema (TOML, version 1)
+
+Unknown keys anywhere are errors. All keys:
+
+| Key | Type | Required | Default | Rules |
+| --- | --- | --- | --- | --- |
+| `version` | integer | yes | - | must be `1` |
+| `poll_interval` | duration string | no | `"30s"` | whole seconds, `5s`..`1h`; also the launchd StartInterval |
+| `power.require_ac` | bool | no | `true` | `true` = never inhibit sleep on battery |
+| `windows` | array of tables | no | none | zero or more `[[windows]]` |
+| `windows[].days` | array of strings | yes | - | lowercase `mon tue wed thu fri sat sun`, no duplicates, non-empty; the day the window **starts** |
+| `windows[].start` | `"HH:MM"` | yes | - | 24-hour, inclusive |
+| `windows[].end` | `"HH:MM"` | yes | - | 24-hour, exclusive; `end <= start` means the window crosses midnight into the next day; `end == start` is an error |
+| `wake.enabled` | bool | no | `false` | enables the recurring pmset wake |
+| `wake.days` | array of strings | when enabled | - | same format as window days |
+| `wake.time` | `"HH:MM"` | when enabled | - | daily wake time (`pmset repeat`) |
+| `wake.action` | string | no | `"wakeorpoweron"` | `wakeorpoweron`, `wake`, or `poweron` |
+| `wake.interval` | duration string | no | off | whole minutes, `5m`..`12h`; reserves extra one-off wake events every interval inside each window for the next 24 h; requires at least one window |
+| `guards.process` | array of tables | no | none | zero or more `[[guards.process]]` |
+| `guards.process[].name` | string | yes | - | `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`, unique; shown in status |
+| `guards.process[].executable` | string | yes | - | absolute, clean path; compared exactly with the executable path of running processes (`ps -axo pid=,comm=`); never executed |
+
+Times use the Mac's local time zone and follow its daylight-saving rules.
+Overlapping windows are allowed and act as a union.
+
+## Examples
+
+Self-hosted CI runner, awake 08:00-20:00 every day on AC, wake at 08:00, and let
+a job that is still running at 20:00 finish:
+
+```toml
+version = 1
+poll_interval = "30s"
+
+[power]
+require_ac = true
+
+[[windows]]
+days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+start = "08:00"
+end = "20:00"
+
+[wake]
+enabled = true
+days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+time = "08:00"
+action = "wakeorpoweron"
+
+[[guards.process]]
+name = "github-actions-job"
+executable = "/Users/ci/actions-runner/bin/Runner.Worker"
+```
+
+Weekdays only, with hourly wake events so a Mac that fell asleep (missed wake,
+manual sleep, AC unplugged and later restored) is back within an hour:
+
+```toml
+version = 1
+
+[[windows]]
+days = ["mon", "tue", "wed", "thu", "fri"]
+start = "09:00"
+end = "18:00"
+
+[wake]
+enabled = true
+days = ["mon", "tue", "wed", "thu", "fri"]
+time = "08:55"
+interval = "1h"
+```
+
+Overnight batch window Friday 22:00 to Saturday 06:00 (the day names the start):
+
+```toml
+version = 1
+
+[[windows]]
+days = ["fri"]
+start = "22:00"
+end = "06:00"
+```
+
+Keep the Mac awake only while a process runs, no schedule at all:
+
+```toml
+version = 1
+
+[power]
+require_ac = false
+
+[[guards.process]]
+name = "render"
+executable = "/Applications/Blender.app/Contents/MacOS/Blender"
+```
+
+Wake reservation only, never inhibit sleep:
+
+```toml
+version = 1
+
+[wake]
+enabled = true
+days = ["mon", "tue", "wed", "thu", "fri"]
+time = "07:30"
+```
+
+Finding a process executable path on the Mac:
+
+```sh
+ps -axo pid=,comm= | grep -i runner.worker
+```
+
+## Commands
+
+```text
+schlaflos init [PATH]                      write the example configuration (default ./schlaflos.toml)
+schlaflos config check PATH                validate; prints the parsed windows, wake, and guards
+schlaflos status [--json]                  last reconciliation: request, observed disablesleep, reason, next transition, wake state
+schlaflos doctor                           invariants, freshness, drift; root adds config/launchd/ledger checks
+sudo schlaflos install --config PATH [--replace-wake-schedule]
+sudo schlaflos config apply PATH [--replace-wake-schedule]
+sudo schlaflos emergency-off               force disablesleep=0, release owned wake events, unload; keeps config
+sudo schlaflos uninstall                   restore pre-install values still owned by schlaflos, remove everything
+sudo schlaflos reconcile [--dry-run]       one reconciliation now (launchd runs this every poll interval)
+schlaflos version
+```
+
+`--replace-wake-schedule` is needed only when an unrelated recurring
+`pmset repeat` schedule already exists; the install refuses otherwise and
+prints the existing schedule.
+
+## Reading status
+
+`schlaflos status --json` fields: `requested` (schlaflos wants sleep inhibited),
+`observed` (actual disablesleep), `reason` (`scheduled_window`,
+`active_process_guard`, `battery_power`, `outside_window`,
+`invalid_configuration`, `power_source_unknown`), `power_source`,
+`inside_window`, `active_guards`, `next_transition`, `wake_installed`,
+`wake_observed`, `wake_events_scheduled`, `next_wake_event`, `conflicts`
+(`sleep_setting_drift`, `wake_schedule_drift`), `degraded`
+(`process_inspection_failed`), `last_transition`, `last_error` (category only),
+`run_ok`.
+
+`requested = false` with `observed = true` means the pre-install baseline was
+already `disablesleep = 1`; schlaflos preserves it.
+
+## Facts that matter when advising
+
+- Inside a window `disablesleep = 1` blocks idle sleep and lid-close sleep. It
+  does not block a manual Sleep from the Apple menu or `pmset sleepnow`.
+- A sleeping Mac cannot run reconciliation; wake reservations are the only
+  local recovery. `wake.time` is the durable daily anchor, `wake.interval`
+  the retry inside the window.
+- Removing AC with `require_ac = true` drops the request within one poll
+  interval; the Mac then sleeps per its battery timer and comes back at the
+  next reserved wake if AC is present again.
+- macOS allows one recurring pmset wake; schlaflos manages that pair as a
+  whole and records the previous one to restore on uninstall.
+- Files: `/Library/Application Support/schlaflos/config.toml` (installed
+  config, root-only), `/var/db/schlaflos/status.json` (world-readable),
+  `/var/log/schlaflos.log` (reconciler log), LaunchDaemon label
+  `io.github.nozomemein.schlaflos`.
+- Not supported in v1: Linux/Windows, remote control, hooks or scripts, more
+  than one recurring pmset schedule.
+
+## Documents
+
+- [README](README.md): overview, install, build.
+- [Operations](docs/operations.md): install, inspect, change, upgrade, recover, uninstall, integration testing.
+- [Architecture](docs/architecture.md): system model, policy, wake scheduling, filesystem layout, packages.
+- [Security model](docs/security.md): trust boundaries, ownership rules, recovery.
+- [Example configuration](examples/schlaflos.toml).

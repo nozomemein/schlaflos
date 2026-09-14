@@ -68,6 +68,8 @@ uses fakes for `pmset` and `launchctl` and never changes power settings.
   invariants, and recovery rules.
 - [Operations](docs/operations.md): install, upgrade, inspect, recover, remove.
 - [Example configuration](examples/schlaflos.toml).
+- [llms.txt](llms.txt): a self-contained reference for AI assistants that
+  help write a configuration or read the status.
 
 ## Status
 

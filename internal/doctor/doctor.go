@@ -128,7 +128,7 @@ func (d Doctor) Run(ctx context.Context) ([]Check, bool) {
 		if err != nil {
 			add(Fail, "configuration", "%v", err)
 		} else {
-			add(OK, "configuration", "valid (poll interval %s, %d window(s), %d process guard(s), wake enabled=%v)", cfg.PollInterval, len(cfg.Windows), len(cfg.Guards.Process), cfg.Wake.Enabled)
+			add(OK, "configuration", "valid (poll interval %s, require_ac=%v, %d window(s), %d process guard(s), wake enabled=%v, interval=%s)", cfg.PollInterval, cfg.Power.RequireAC, len(cfg.Windows), len(cfg.Guards.Process), cfg.Wake.Enabled, cfg.Wake.Interval)
 		}
 		loaded, err := d.Launchd.Loaded(ctx)
 		switch {

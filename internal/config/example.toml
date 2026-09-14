@@ -1,0 +1,26 @@
+# schlaflos configuration example
+#
+# Keep the Mac awake between 08:00 and 20:00 every day while connected to AC.
+# If a GitHub Actions job is still running at 20:00, keep it awake until the job
+# finishes. Never inhibit sleep on battery power.
+
+version = 1
+poll_interval = "30s"
+
+[power]
+require_ac = true
+
+[[windows]]
+days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+start = "08:00"
+end = "20:00"
+
+[wake]
+enabled = true
+days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+time = "08:00"
+action = "wakeorpoweron"
+
+[[guards.process]]
+name = "github-actions-job"
+executable = "/Users/example/actions-runner/bin/Runner.Worker"

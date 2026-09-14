@@ -150,8 +150,41 @@ The one-off events carry `io.github.nozomemein.schlaflos` as their owner
 identifier. Ownership is therefore established by the event itself, not by the
 ledger: reconciliation lists the owned events, cancels those outside the plan,
 and reserves the missing ones; `emergency-off` and `uninstall` cancel every
-owned event and never touch events of other owners. The API is a user-space
-IOKit call made through cgo; no system extension is involved.
+owned event and never touch events of other owners.
+
+### Why the one-off events call IOKit directly
+
+This is the only place where v1 bypasses `/usr/bin/pmset`, so the decision is
+recorded here.
+
+- `pmset repeat` cannot express "every hour": macOS stores exactly one
+  recurring on event and one recurring off event.
+- `pmset schedule wake DATE` can reserve any number of one-off events, but
+  every event created through the command line is recorded with the owner
+  `pmset`. Events reserved by schlaflos would be indistinguishable from events
+  reserved by an operator or by other tools, and the security model forbids
+  cancelling or replacing values that schlaflos does not own. Restoring the
+  system on uninstall would become guesswork.
+- `pmset` itself calls `IOPMSchedulePowerEvent(date, owner, type)`. Calling
+  the same function with schlaflos's own owner string makes ownership a
+  property of the event: `IOPMCopyScheduledPowerEvents` lists it, and
+  `IOPMCancelScheduledPowerEvent` only matches on owner, time, and type. The
+  events are visible to operators in `pmset -g sched` as
+  `by 'io.github.nozomemein.schlaflos'`.
+- The functions are ordinary user-space IOKit calls that require root, which
+  the reconciler already has. No kernel extension, system extension, DriverKit
+  driver, or entitlement is involved; DriverKit addresses device drivers, not
+  power scheduling.
+- Cost: the binding is three functions and roughly eighty lines of C behind
+  cgo. Building therefore needs a C toolchain (Xcode Command Line Tools), also
+  for `go install`, and cross-compiling requires `CGO_ENABLED=1`.
+- Alternatives considered: Wake on LAN from another host (`womp` is supported,
+  but it needs an always-on coordinator and is a v1 non-goal), and the
+  `acwake` power setting (wake on power-source change), which current Apple
+  silicon hardware does not expose in `pmset -g cap`.
+
+When `wake.interval` is unset, the binding is used only to list events; no
+event is ever reserved or cancelled.
 
 The wake schedule is reconciled idempotently whenever `schlaflos` is already
 running: the current `pmset` schedule is read, compared with the desired schedule,

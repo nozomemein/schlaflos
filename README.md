@@ -25,13 +25,21 @@ schlaflos status
 ```
 
 See the [architecture](docs/architecture.md) and
-[example configuration](examples/schlaflos.toml) for the proposed v1 design.
+[security model](docs/security.md) for the proposed v1 design. An
+[example configuration](examples/schlaflos.toml) shows the intended configuration
+format.
 
 ## Status
 
 The command-line interface and configuration format documented here are a design
 contract for the initial implementation. They may change before the first tagged
 release.
+
+## Security
+
+See the [security policy](SECURITY.md) to report a vulnerability. The
+[security model](docs/security.md) describes the proposed privilege boundary and
+installation invariants.
 
 ## License
 

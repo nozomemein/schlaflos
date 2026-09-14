@@ -46,7 +46,8 @@ config.toml ───────────────┐
 clock ─────────────────────┤
 AC/battery state ──────────┼─> policy ─> desired state ─> macOS power adapter
 matching processes ────────┘                    │
-                                                └─> state.json
+                                                ├─> private state.json
+                                                └─> redacted status.json
 
 launchd ── every N seconds ──> schlaflos reconcile
 pmset   ── recurring event ──> wake or power on
@@ -67,6 +68,14 @@ the baseline. Releasing a `schlaflos` inhibition restores that baseline instead 
 blindly writing `0`. Uninstall follows the same rule. While installed,
 `schlaflos` is expected to be the only manager of `disablesleep`; `doctor` reports
 an external change as a conflict.
+
+The baseline must be persisted atomically before the first power-setting mutation.
+The private state also records the last value written by `schlaflos`. If the
+observed value later differs, reconciliation records the conflict and converges it
+to the current effective policy while the service remains installed. Uninstall
+restores the baseline only when the observed value still matches the last value
+written by `schlaflos`; otherwise it leaves the external value unchanged and
+reports the conflict.
 
 ## 4. Policy
 
@@ -96,7 +105,8 @@ output distinguishes the policy request from the effective system setting.
 
 For the common self-hosted runner setup, a window can keep the Mac available from
 08:00 to 20:00 every day, while a guard matching `Runner.Worker` lets a job that
-started before 20:00 finish. Removing AC power permits normal sleep immediately.
+started before 20:00 finish. Removing AC power releases the `schlaflos` inhibition
+request immediately; the effective setting then returns to the recorded baseline.
 
 ### Window semantics
 
@@ -120,8 +130,9 @@ on/off pair.
 
 The wake schedule is reconciled idempotently whenever `schlaflos` is already
 running: the current `pmset` schedule is read, compared with the desired schedule,
-and changed only when necessary. This guarantees the wake reservation, not the
-outcome of a past wake attempt.
+and changed only when necessary. The private state records both the pre-install
+baseline and the last schedule written by `schlaflos`. This guarantees the wake
+reservation, not the outcome of a past wake attempt.
 
 A sleeping Mac cannot run a local periodic check. Consequently, `launchd` cannot
 notice at 08:15 that an 08:00 wake was missed and wake the same machine. Supporting
@@ -135,9 +146,11 @@ allows it, sleep inhibition is enabled without waiting for the next interval.
 
 Installation must read the current schedule before changing it. If an unrelated
 schedule exists, `schlaflos` refuses to replace it unless the operator supplies
-`--replace-wake-schedule`. The schedule installed by `schlaflos` is recorded in
-the state file. Uninstall removes it only when the current schedule still matches
-that recorded value.
+`--replace-wake-schedule`. While installed, `schlaflos` treats the recurring wake
+schedule as an exclusively managed global resource and repairs drift. Uninstall
+restores the pre-install schedule only when the current schedule still matches the
+last value written by `schlaflos`; otherwise it preserves the external value and
+reports a conflict.
 
 A wake event can wake a sleeping Mac with power available. It cannot compensate
 for an unplugged and depleted machine, and a FileVault-protected Mac that fully
@@ -154,26 +167,35 @@ narrow:
 - configuration cannot define arbitrary commands or hooks;
 - privileged paths do not expand `~` or environment variables;
 - installed binaries and configuration are not user-writable;
+- every component of a privileged path is verified as root-owned and not
+  group-writable or world-writable before use;
 - writes use a temporary file, ownership and mode checks, then atomic rename;
 - symlinks are rejected for privileged configuration and state paths;
-- status redacts process arguments and reports only configured guard names.
+- status redacts process arguments and reports only configured guard names;
+- configuration, state, status, and logs never contain credentials or other
+  secrets;
+- the LaunchDaemon receives a minimal environment and invokes all subprocesses by
+  absolute path.
 
 Configuration is validated before elevation for fast feedback and again by the
 privileged process before installation or application. An invalid installed
-configuration fails safe by requesting normal sleep behavior and recording an
-error rather than continuing a stale assertion indefinitely.
+configuration fails safe by restoring the recorded baseline and recording an error
+rather than continuing a stale `schlaflos` request indefinitely.
 
 Public repositories make this boundary especially important: configuration must
 never turn the root service into a generic command runner.
+
+The complete trust boundary, installation invariants, and recovery rules are
+documented in [`security.md`](security.md).
 
 ## 7. Filesystem layout
 
 ```text
 /usr/local/bin/schlaflos
-    User-facing executable (or symlink to the versioned binary).
+    User-facing convenience executable. launchd never targets this path.
 
-/usr/local/libexec/schlaflos/schlaflos
-    Root-owned executable invoked by launchd.
+/Library/Application Support/schlaflos/bin/schlaflos
+    Root-owned executable invoked by launchd using this fixed absolute path.
 
 /Library/Application Support/schlaflos/config.toml
     Root-owned installed configuration.
@@ -182,12 +204,32 @@ never turn the root service into a generic command runner.
     Root-owned launchd job.
 
 /var/db/schlaflos/state.json
-    Last observed state, transition, installed wake schedule, and error.
+    Private ownership ledger: baselines, last applied values, and schema version.
+
+/var/db/schlaflos/status.json
+    Redacted status projection readable by unprivileged users.
+
+/var/run/schlaflos/reconcile.lock
+    Root-owned lock preventing concurrent manual and launchd reconciliation.
 ```
 
-Recommended permissions are `root:wheel` with mode `0755` for directories and
-executables and `0644` for configuration and the LaunchDaemon plist. The state
-file should be `0600` unless a separate unprivileged status projection is added.
+The installation directory and every privileged ancestor must be root-owned and
+must not be group-writable or world-writable. The installer fails rather than
+repairing or trusting an unsafe ancestor. The installed modes are:
+
+| Artifact | Owner | Mode |
+| --- | --- | --- |
+| Privileged directories | `root:wheel` | `0755` |
+| Root-executed binary | `root:wheel` | `0755` |
+| Installed configuration | `root:wheel` | `0600` |
+| LaunchDaemon plist | `root:wheel` | `0600` |
+| Private state | `root:wheel` | `0600` |
+| Redacted status | `root:wheel` | `0644` |
+| Reconciliation lock | `root:wheel` | `0600` |
+
+`/usr/local/bin/schlaflos` is not part of the LaunchDaemon trust chain. It may be a
+copy or symlink installed for interactive use, but the plist always names the
+root-owned binary under `/Library/Application Support`.
 
 ## 8. Command-line interface
 
@@ -210,10 +252,11 @@ Internal/service command:
 schlaflos reconcile [--dry-run]
 ```
 
-`emergency-off` explicitly forces `disablesleep = 0` and unloads the LaunchDaemon
-without deleting configuration. This command intentionally overrides the recorded
-baseline and exists as a recovery control. `uninstall` restores the recorded
-pre-install baseline, then removes only artifacts owned by `schlaflos`.
+`emergency-off` explicitly forces `disablesleep = 0`, removes the wake schedule
+only when it is still owned by `schlaflos`, and unloads the LaunchDaemon without
+deleting configuration. This command intentionally overrides the recorded sleep
+baseline and exists as a recovery control. `uninstall` conditionally restores the
+recorded pre-install baselines, then removes only artifacts owned by `schlaflos`.
 
 `status` reports:
 
@@ -225,6 +268,9 @@ pre-install baseline, then removes only artifacts owned by `schlaflos`.
 - last successful transition and last error;
 - installed and observed wake schedule.
 
+The command reads only the redacted `status.json`. It never needs permission to
+read the private ownership ledger.
+
 ## 9. Configuration
 
 The v1 configuration format is versioned TOML. See
@@ -232,6 +278,10 @@ The v1 configuration format is versioned TOML. See
 
 Strict decoding is required: unknown keys are rejected rather than ignored. This
 prevents a typo in a safety-related option from silently changing behavior.
+
+Secrets are not valid configuration values. Authentication tokens, signing
+material, runner credentials, and arbitrary environment variables are outside the
+schema and must never be copied into the installed configuration.
 
 Process guards match a canonical executable path, not a substring of a shell
 command line. This reduces false positives and avoids exposing full arguments in
@@ -246,7 +296,7 @@ internal/config/               TOML schema, decoding, validation
 internal/policy/               pure desired-state calculation and reason codes
 internal/reconcile/            orchestration and transition logic
 internal/processguard/         process snapshot and executable matching
-internal/state/                durable status snapshot and atomic persistence
+internal/state/                private ledger, redacted status, atomic persistence
 internal/platform/macos/power/ AC state and sleep-inhibition adapter
 internal/platform/macos/wake/  pmset schedule inspection and mutation
 internal/platform/macos/launchd/ plist rendering and service management
@@ -264,22 +314,28 @@ files, or macOS.
 
 Each reconciliation follows this sequence:
 
-1. Open and strictly validate the installed configuration.
-2. Read local time, power source, relevant processes, and observed sleep state.
-3. Evaluate policy without side effects.
-4. Apply a transition only if desired and observed states differ.
-5. Atomically persist a redacted status snapshot.
+1. Acquire the root-owned reconciliation lock without following symlinks.
+2. Open and strictly validate the installed configuration and private state.
+3. Read local time, power source, relevant processes, and observed sleep state.
+4. Evaluate policy without side effects.
+5. Apply a transition only if desired and observed states differ.
+6. Persist private state, when changed, and a redacted status snapshot atomically.
+7. Release the reconciliation lock and exit.
 
 Failure behavior:
 
 - Invalid configuration: restore the recorded pre-install baseline, record the
   validation error, exit non-zero.
+- Missing or corrupt private state: make no power or wake-schedule mutation, write
+  an error through the protected logging path, and require explicit recovery.
 - Power-source read failure: make no power mutation, record the error, exit
   non-zero.
 - Process inspection failure: do not treat guards as active; record a degraded
   status so the operator can see the loss of protection.
 - Mutation failure: retain the observed state, record the error, exit non-zero.
 - State-file failure: log to the launchd standard-error path and exit non-zero.
+- Concurrent invocation: leave mutation to the lock holder and exit without
+  changing state.
 
 `launchd` retries at the next interval. Reconciliation must be idempotent so that
 retries are harmless.
@@ -297,7 +353,8 @@ The most important tests are policy table tests covering:
 
 Platform adapters use captured command output and fixed argument assertions.
 Additional tests cover atomic state writes, symlink rejection, plist rendering,
-and ownership/mode validation.
+ownership and mode validation for complete path chains, concurrent invocation,
+corrupt-state recovery, drift detection, and redaction of public status.
 
 Privileged integration tests should run only on a dedicated Mac. They should verify
 install, repeated reconciliation, wake-schedule conflict handling,

@@ -106,7 +106,7 @@ assert_exit 0 "config check inside"  "$BIN" config check "$WORK/inside.toml"
 assert_exit 0 "config check outside" "$BIN" config check "$WORK/outside.toml"
 
 log "install"
-assert_exit 0 "install" "$BIN" install --config "$WORK/inside.toml" "${REPLACE[@]}"
+assert_exit 0 "install" "$BIN" install --config "$WORK/inside.toml" ${REPLACE[@]+"${REPLACE[@]}"}
 assert_eq "$(loaded)" yes "launchd loaded"
 assert_eq "$(stat -f '%Su:%Sg %Lp' '/Library/Application Support/schlaflos/config.toml')" "root:wheel 600" "config ownership/mode"
 assert_eq "$(stat -f '%Su:%Sg %Lp' /private/var/db/schlaflos/state.json)" "root:wheel 600" "state ownership/mode"
@@ -135,7 +135,7 @@ assert_contains "$(status_field conflicts; grep -o 'sleep_setting_drift' "$STATU
 assert_eq "$(sleep_disabled)" "$PRE_SLEEP" "drift converged back to policy"
 
 log "emergency-off"
-"$BIN" config apply "$WORK/inside.toml" "${REPLACE[@]}" >/dev/null
+"$BIN" config apply "$WORK/inside.toml" ${REPLACE[@]+"${REPLACE[@]}"} >/dev/null
 wait_status reason scheduled_window || true
 assert_exit 0 "emergency-off" "$BIN" emergency-off
 assert_eq "$(loaded)" no "launchd unloaded"
@@ -146,7 +146,7 @@ if [[ -e "/Library/Application Support/schlaflos/config.toml" ]]; then ok "confi
 assert_exit 0 "doctor reports without failing" "$BIN" doctor
 
 log "upgrade (install over existing)"
-assert_exit 0 "reinstall" "$BIN" install --config "$WORK/inside.toml" "${REPLACE[@]}"
+assert_exit 0 "reinstall" "$BIN" install --config "$WORK/inside.toml" ${REPLACE[@]+"${REPLACE[@]}"}
 if wait_status reason scheduled_window; then ok "reconciliation after upgrade"; else fail "no reconciliation after upgrade"; fi
 assert_eq "$(sleep_disabled)" 1 "disablesleep after upgrade"
 

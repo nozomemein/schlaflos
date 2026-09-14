@@ -387,9 +387,16 @@ func (r *run) applyWakeEvents(ctx context.Context, cfg *config.Config) {
 	var extra []wakeevents.Event
 	for _, e := range observed {
 		have[e.Key()] = true
-		if !want[e.Key()] {
-			extra = append(extra, e)
+		if want[e.Key()] {
+			continue
 		}
+		// An owned event that is about to fire is outside the plan only
+		// because of the margin; cancelling it now would lose the very wake
+		// it was reserved for. Leave it and let powerd consume it.
+		if e.Time.After(r.now) && !e.Time.After(r.now.Add(WakeEventMargin)) && cfg.Wake.Enabled && cfg.Wake.Interval > 0 {
+			continue
+		}
+		extra = append(extra, e)
 	}
 	var missing []wakeevents.Event
 	for _, e := range desired {

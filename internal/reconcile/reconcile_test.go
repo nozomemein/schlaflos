@@ -647,3 +647,29 @@ func TestWakeEventsDryRunAndErrors(t *testing.T) {
 		t.Fatalf("nil scheduler: err=%v status=%+v", err, status)
 	}
 }
+
+func TestImminentOwnedWakeEventIsNotCancelled(t *testing.T) {
+	h := newHarness(t, cfgInterval, false, wake.Schedule{})
+	// 12:59:30: the 13:00 event is inside the one-minute margin.
+	h.deps.Clock = func() time.Time { return noon.Add(59*time.Minute + 30*time.Second) }
+	imminent := wakeevents.Event{Time: noon.Add(time.Hour), Owner: wakeevents.Owner, Type: "wakepoweron"}
+	stale := wakeevents.Event{Time: noon.Add(-time.Hour), Owner: wakeevents.Owner, Type: "wakepoweron"}
+	h.events.Events = []wakeevents.Event{imminent, stale}
+	if _, err := Run(context.Background(), h.deps); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range h.events.Cancelled {
+		if c.Key() == imminent.Key() {
+			t.Fatal("imminent owned event was cancelled")
+		}
+	}
+	if len(h.events.Cancelled) != 1 || h.events.Cancelled[0].Key() != stale.Key() {
+		t.Fatalf("stale event not cancelled: %v", h.events.Cancelled)
+	}
+	// With interval wakes disabled the imminent event is released like any other.
+	h.deps.FS.WriteFile(h.deps.Layout.ConfigPath, []byte(cfgWake), layout.ModeConfig)
+	Run(context.Background(), h.deps)
+	if len(h.events.Events) != 0 {
+		t.Fatalf("events left after disabling interval: %v", h.events.Events)
+	}
+}

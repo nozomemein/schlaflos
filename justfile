@@ -46,13 +46,12 @@ dist:
 clean:
     rm -rf bin dist
 
-# Run the privileged integration test inside a throwaway Tart macOS VM.
 # Needs Apple silicon, `tart`, and ~25 GB free disk for the base image.
+# Run the privileged integration test inside a throwaway Tart macOS VM (host untouched).
 integration-vm: build
     scripts/integration-vm.sh ./bin/schlaflos
 
-# Run the privileged integration test on THIS machine. Only for a dedicated
-# Mac: it installs the LaunchDaemon and changes pmset settings, then removes
-# everything again.
+# Installs the LaunchDaemon and changes pmset settings, then removes everything again.
+# Run the privileged integration test on THIS machine (dedicated Mac only).
 integration-privileged: build
     sudo SCHLAFLOS_INTEGRATION_CONFIRM=1 scripts/integration-privileged.sh ./bin/schlaflos
